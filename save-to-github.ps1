@@ -16,7 +16,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot read the authenticated GitHub account.' }
     $account = $accountJson | ConvertFrom-Json
     if ($account.login -ne 'lverl') { throw "Expected GitHub account lverl; found $($account.login). No upload performed." }
-    $repository = "$($account.login)/Cosm2"
+    $repository = "$($account.login)/skin-research-intelligence"
     $remoteUrl = "https://github.com/$repository.git"
 
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot '.git'))) {
@@ -61,8 +61,8 @@ try {
     # List only repositories owned by this account. An existing repo is never overwritten.
     $repositoryJson = & $githubCli repo list $account.login --limit 1000 --json name,isPrivate
     if ($LASTEXITCODE -ne 0) { throw 'Cannot check existing GitHub repositories.' }
-    $existing = @($repositoryJson | ConvertFrom-Json) | Where-Object { $_.name -ieq 'Cosm2' }
-    if ($existing -and -not $existing.isPrivate) { throw 'Cosm2 already exists and is public. Upload stopped.' }
+    $existing = @($repositoryJson | ConvertFrom-Json) | Where-Object { $_.name -ieq 'skin-research-intelligence' }
+    if ($existing -and -not $existing.isPrivate) { throw 'skin-research-intelligence already exists and is public. Upload stopped.' }
     if (-not $existing) {
         & $githubCli repo create $repository --private --description 'Skin Research Intelligence: evidence-based skincare research and daily digests'
         if ($LASTEXITCODE -ne 0) { throw 'Cannot create the private repository.' }
