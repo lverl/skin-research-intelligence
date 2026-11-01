@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: skin_research
       POSTGRES_USER: skin
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -15,7 +15,7 @@ services:
   worker:
     build: .
     environment:
-      DATABASE_URL: postgresql://skin:${POSTGRES_PASSWORD}@postgres:5432/skin_research
+      DATABASE_URL: postgresql://skin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/skin_research
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       MODEL: ${MODEL:-}
       MODEL_MONTHLY_USD: ${MODEL_MONTHLY_USD:-0}
@@ -33,10 +33,10 @@ services:
     build: .
     command: [python, main.py, web]
     environment:
-      DATABASE_URL: postgresql://skin:${POSTGRES_PASSWORD}@postgres:5432/skin_research
+      DATABASE_URL: postgresql://skin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/skin_research
       PORT: '8000'
-      APP_TOKEN: ${APP_TOKEN:?Set APP_TOKEN to at least 16 characters}
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      APP_TOKEN: ${SERVICE_PASSWORD_APP}
+      ADMIN_TOKEN: ${SERVICE_PASSWORD_ADMIN}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       MODEL: ${MODEL:-}
       MODEL_MONTHLY_USD: ${MODEL_MONTHLY_USD:-0}
@@ -52,7 +52,7 @@ services:
     build: .
     command: [python, main.py, bot]
     environment:
-      DATABASE_URL: postgresql://skin:${POSTGRES_PASSWORD}@postgres:5432/skin_research
+      DATABASE_URL: postgresql://skin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/skin_research
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
       TELEGRAM_CHAT_IDS: ${TELEGRAM_CHAT_IDS:-}
     depends_on:
