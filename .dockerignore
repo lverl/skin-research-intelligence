@@ -1,0 +1,8 @@
+.venv
+.env
+.codex
+upstream
+__pycache__
+downloads
+.local-postgres
+Picture1.png

@@ -1,0 +1,14 @@
+[
+  {"name":"Europe PMC","kind":"europe_pmc","url":"https://www.ebi.ac.uk/europepmc/webservices/rest/search","active":true,"interval_hours":24,"config":{"query":"skin care OR skin rejuvenation OR cosmetic dermatology","limit":20,"full_text":true}},
+  {"name":"PubMed","kind":"pubmed","url":"https://eutils.ncbi.nlm.nih.gov/entrez/eutils","active":true,"interval_hours":24,"config":{"query":"(skin rejuvenation OR skin care OR cosmetic dermatology)","limit":20}},
+  {"name":"Crossref","kind":"crossref","url":"https://api.crossref.org/works","active":true,"interval_hours":168,"config":{"query":"skin rejuvenation cosmetic dermatology","limit":20}},
+  {"name":"ClinicalTrials.gov","kind":"clinicaltrials","url":"https://clinicaltrials.gov/api/v2/studies","active":true,"interval_hours":24,"config":{"query":"skin rejuvenation","limit":20}},
+  {"name":"openFDA","kind":"openfda","url":"https://api.fda.gov/device/event.json","active":true,"interval_hours":24,"config":{"query":"device.generic_name:laser","limit":20}},
+  {"name":"MFDS Cosmetic Ingredients","kind":"mfds","url":"https://www.data.go.kr/data/15111774/openapi.do","active":false,"interval_hours":168,"config":{"reason":"Requires MFDS_API_KEY and registered approved_endpoint, items_path, title_field, id_field","limit":20}},
+  {"name":"Premium Beauty News","kind":"rss","url":"https://www.premiumbeautynews.com/spip.php?page=backend&lang=en","active":true,"interval_hours":24,"config":{"limit":20,"access_status":"RSS candidate; test before production"}},
+  {"name":"CosmeticsDesign-Europe","kind":"rss","url":"https://www.cosmeticsdesign-europe.com/","active":false,"interval_hours":24,"config":{"reason":"Verified RSS URL required; homepage is not a feed","limit":20}},
+  {"name":"CosmeticsDesign-Asia","kind":"rss","url":"https://www.cosmeticsdesign-asia.com/","active":false,"interval_hours":24,"config":{"reason":"Verified RSS URL required; homepage is not a feed","limit":20}},
+  {"name":"Beauty Insider","kind":"rss","url":"https://www.beautyinsider.ru/feed/","active":true,"interval_hours":24,"config":{"limit":20,"access_status":"RSS response confirmed; thematic filtering required"}},
+  {"name":"Google News","kind":"rss","url":"https://news.google.com/","active":false,"interval_hours":24,"config":{"reason":"Configure and test topic-specific RSS and original URL resolution before activation","limit":20}},
+  {"name":"Open Beauty Facts","kind":"beauty_facts","url":"https://world.openbeautyfacts.org/cgi/search.pl","active":true,"interval_hours":168,"config":{"query":"skin","limit":20,"attribution":"Open Beauty Facts — ODbL; check applicable reuse obligations"}}
+]
