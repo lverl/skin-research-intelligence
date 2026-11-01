@@ -14,9 +14,17 @@ services:
       retries: 20
   worker:
     build: .
-    env_file: .env
     environment:
       DATABASE_URL: postgresql://skin:${POSTGRES_PASSWORD}@postgres:5432/skin_research
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MODEL: ${MODEL:-}
+      MODEL_MONTHLY_USD: ${MODEL_MONTHLY_USD:-0}
+      MODEL_CALL_RESERVE_USD: ${MODEL_CALL_RESERVE_USD:-1}
+      DIGEST_TIMEZONE: ${DIGEST_TIMEZONE:-Europe/Moscow}
+      DIGEST_HOUR: ${DIGEST_HOUR:-19}
+      NCBI_API_KEY: ${NCBI_API_KEY:-}
+      OPENFDA_API_KEY: ${OPENFDA_API_KEY:-}
+      MFDS_API_KEY: ${MFDS_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -24,9 +32,18 @@ services:
   web:
     build: .
     command: [python, main.py, web]
-    env_file: .env
     environment:
       DATABASE_URL: postgresql://skin:${POSTGRES_PASSWORD}@postgres:5432/skin_research
+      PORT: '8000'
+      APP_TOKEN: ${APP_TOKEN:?Set APP_TOKEN to at least 16 characters}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MODEL: ${MODEL:-}
+      MODEL_MONTHLY_USD: ${MODEL_MONTHLY_USD:-0}
+      MODEL_CALL_RESERVE_USD: ${MODEL_CALL_RESERVE_USD:-1}
+      NCBI_API_KEY: ${NCBI_API_KEY:-}
+      OPENFDA_API_KEY: ${OPENFDA_API_KEY:-}
+      MFDS_API_KEY: ${MFDS_API_KEY:-}
     ports: ['127.0.0.1:8000:8000']
     depends_on:
       postgres:
@@ -34,9 +51,10 @@ services:
   bot:
     build: .
     command: [python, main.py, bot]
-    env_file: .env
     environment:
       DATABASE_URL: postgresql://skin:${POSTGRES_PASSWORD}@postgres:5432/skin_research
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      TELEGRAM_CHAT_IDS: ${TELEGRAM_CHAT_IDS:-}
     depends_on:
       postgres:
         condition: service_healthy
