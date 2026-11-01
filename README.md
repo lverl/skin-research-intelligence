@@ -29,13 +29,13 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe main.py web
 ```
 
-Вход на http://localhost:8000 — HTTP Basic: любое имя, APP_TOKEN как пароль; ADMIN_TOKEN открывает настройки. Внешний доступ только через HTTPS reverse proxy. По умолчанию Compose привязывает веб к localhost.
+Вход при локальном запуске на http://localhost:8000 — HTTP Basic: любое имя, APP_TOKEN как пароль; ADMIN_TOKEN открывает настройки. Внешний доступ только через HTTPS reverse proxy. Основной Compose не занимает порты хоста: в Coolify доступ идёт через домен и прокси к внутреннему порту web:8000.
 
 `python main.py collector` делает один проход; worker сам запускает сбор по расписанию источников, обработку и проверяет ежедневный выпуск. Час выпуска задаёт DIGEST_HOUR (по умолчанию 19), часовой пояс DIGEST_TIMEZONE (Europe/Moscow). Это стартовые настройки, а не ранее согласованное пользователем время.
 
 `python main.py bot` отправляет подготовленные выпуски в Telegram. Нужны TELEGRAM_TOKEN и TELEGRAM_CHAT_IDS через запятую; получатели должны предварительно открыть бота. Посторонние автоматически не подписываются. Не запускайте этот сервис, пока не готовы к реальной отправке.
 
-Compose: `docker compose up --build`. Сервисы worker/web/bot и Postgres используют одну схему. Секреты и данные БД не входят в образ.
+Локальный Compose с доступом из браузера: `docker compose -f docker-compose.yml -f docker-compose.local.yml up --build`. Дополнительный файл публикует веб только на localhost; при занятом порте задайте LOCAL_WEB_PORT, например 18000. В Coolify используйте только основной docker-compose.yml. Сервисы worker/web/bot и Postgres используют одну схему. Секреты и данные БД не входят в образ.
 
 ## Развёртывание в Coolify
 

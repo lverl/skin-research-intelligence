@@ -10,13 +10,15 @@ COMPOSE=ROOT/'downloads'/'docker-compose.exe'
 
 @unittest.skipUnless(COMPOSE.exists(), 'Standalone Docker Compose is required')
 class ComposeTests(unittest.TestCase):
-    def config(self,**changes):
+    def config(self,local=False,**changes):
         env=dict(os.environ,SERVICE_PASSWORD_POSTGRES='testOnlyDatabasePassword32',SERVICE_PASSWORD_APP='testOnlyApplicationToken32',SERVICE_PASSWORD_ADMIN='testOnlyAdminToken32',
                  OPENROUTER_API_KEY='testOnlyModelKey',MODEL='test/model',MODEL_MONTHLY_USD='0',
                  MODEL_CALL_RESERVE_USD='1',ADMIN_TOKEN='testOnlyAdminToken32',TELEGRAM_TOKEN='testOnlyTelegramToken',
                  TELEGRAM_CHAT_IDS='123',NCBI_API_KEY='',OPENFDA_API_KEY='',MFDS_API_KEY='')
         env.update(changes)
-        return subprocess.run([str(COMPOSE),'-f',str(ROOT/'docker-compose.yml'),'config','--format','json'],
+        command=[str(COMPOSE),'-f',str(ROOT/'docker-compose.yml')]
+        if local: command.extend(['-f',str(ROOT/'docker-compose.local.yml')])
+        return subprocess.run(command+['config','--format','json'],
                               cwd=ROOT,env=env,capture_output=True,text=True,timeout=30)
 
     def test_configuration_does_not_require_local_env_file(self):
@@ -48,3 +50,17 @@ class ComposeTests(unittest.TestCase):
         for name in ('POSTGRES','APP','ADMIN'):
             self.assertIn('${SERVICE_PASSWORD_'+name+'}',source)
         self.assertNotIn(':?Set',source)
+
+    def test_coolify_does_not_claim_host_ports(self):
+        services=json.loads(self.config().stdout)['services']
+        for service in services.values(): self.assertFalse(service.get('ports'))
+        self.assertIn('8000',services['web']['expose'])
+
+    def test_local_override_publishes_only_on_loopback(self):
+        result=self.config(local=True,LOCAL_WEB_PORT='18000')
+        self.assertEqual(result.returncode,0,result.stderr)
+        ports=json.loads(result.stdout)['services']['web']['ports']
+        self.assertEqual(len(ports),1)
+        self.assertEqual(ports[0]['host_ip'],'127.0.0.1')
+        self.assertEqual(str(ports[0]['published']),'18000')
+        self.assertEqual(ports[0]['target'],8000)

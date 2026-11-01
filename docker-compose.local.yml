@@ -1,0 +1,5 @@
+# Optional localhost access when running without the Coolify proxy.
+services:
+  web:
+    ports:
+      - '127.0.0.1:${LOCAL_WEB_PORT:-8000}:8000'

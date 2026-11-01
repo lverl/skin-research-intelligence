@@ -43,7 +43,7 @@ try {
     }
 
     $projectFiles = @('.dockerignore','.env.example','.gitignore','Dockerfile','PRD.md','README.md','STATUS.md',
-        'bot','collector','db','digest.py','docker-compose.yml','docs','evidence.py','llm.py','main.py','net.py',
+        'bot','collector','db','digest.py','docker-compose.yml','docker-compose.local.yml','docs','evidence.py','llm.py','main.py','net.py',
         'requirements.txt','research.py','skin_research_sources_30.md','sources.json','tests','web','worker',
         'login-github.cmd','save-to-github.cmd','save-to-github.ps1')
     Invoke-GitChecked -Arguments (@('add','--') + $projectFiles)
