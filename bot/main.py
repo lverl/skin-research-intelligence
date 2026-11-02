@@ -232,19 +232,33 @@ def poll_once(conn):
 
 
 def main():
+    db.log('bot','Telegram-сервис запущен')
     while True:
         try:
             with db.connect() as conn:
                 db.init_schema(conn)
+                if not os.environ.get('TELEGRAM_TOKEN','').strip():
+                    db.log('bot','TELEGRAM_TOKEN не задан: укажите токен своего бота в Coolify и выполните Redeploy')
+                    time.sleep(30)
+                    continue
                 if not conn.execute('SELECT pg_try_advisory_lock(4212)').fetchone()[0]:
                     db.log('bot', 'Another bot instance is already running')
                     time.sleep(10)
                     continue
+                identity=api('getMe',{})
+                db.log('bot','Подключён @'+str(identity.get('username',''))+'; разрешённых чатов: '+str(len(configured_chats()))+'; ожидаю сообщения, /id доступна до настройки списка чатов')
                 # Drain durable replies before waiting for additional updates.
                 process_updates(conn)
                 while True:
                     deliver(conn)
                     poll_once(conn)
         except Exception as error:
-            db.log('bot', type(error).__name__)
+            message=type(error).__name__
+            if isinstance(error,TelegramError):
+                message+=' HTTP '+str(error.code)
+                if error.code==409:
+                    message+=': Telegram уже используется другим процессом или настроен webhook'
+                elif error.code==401:
+                    message+=': проверьте TELEGRAM_TOKEN'
+            db.log('bot',message)
         time.sleep(10)
