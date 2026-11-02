@@ -7,7 +7,7 @@ from unittest.mock import patch
 import digest
 import research
 import llm
-from bot.main import chunks,format_digest
+from bot.main import chunks,format_digest,send
 
 class Result:
     def __init__(self,rows): self.rows=rows
@@ -153,12 +153,30 @@ class PipelineTests(unittest.TestCase):
         content={'items':[{'title':'Уход','summary':'Данные','significance':'Смысл','limitations':'Аннотация','sources':[{'url':'https://example.org','kind':'research'}]}],
                  'conclusion_updates':[{'topic':'Клетки','version':1}]}
         text=format_digest('2026-11-02',content)
-        self.assertIn('Что узнали: Данные',text)
-        self.assertIn('Что это значит для ухода: Смысл',text)
-        self.assertIn('Ограничения: Аннотация',text)
+        self.assertIn('• Данные',text)
+        self.assertNotIn('Смысл',text)
+        self.assertIn('Аннотация',text)
         self.assertIn('https://example.org',text)
         self.assertNotIn('версия',text)
         self.assertNotIn('research',text)
+
+    def test_digest_batches_five_items_with_links_preserved(self):
+        content={'items':[{'summary':f'Материал {i}','sources':[{'url':f'https://example.org/{i}','name':'Источник'}]} for i in range(10)]}
+        parts=chunks(format_digest('2026-11-02',content))
+        self.assertEqual(len(parts),2)
+        self.assertTrue(all(part.count('• ')==5 for part in parts))
+        for i in range(10):
+            self.assertIn(f'https://example.org/{i}', '\n'.join(parts))
+
+    def test_digest_summary_is_clickable_with_utf16_offsets(self):
+        text=format_digest('2026-11-02',{'items':[{'summary':'Уход 🌿','sources':[{'url':'https://example.org'}]}]})
+        with patch('bot.main.api') as api:
+            send(123,text)
+        payload=api.call_args.args[1]
+        entity=payload['entities'][0]
+        self.assertEqual(entity['url'],'https://example.org')
+        encoded=text.encode('utf-16-le')
+        self.assertEqual(encoded[entity['offset']*2:(entity['offset']+entity['length'])*2].decode('utf-16-le'),'Уход 🌿')
 
     def test_empty_answer_never_calls_model(self):
         with patch.object(llm,'call') as model:

@@ -1,9 +1,11 @@
 """Private Telegram research chat and resumable daily digest delivery."""
 import json
 import os
+import re
 import time
 import urllib.request
 import urllib.error
+from urllib.parse import urlparse
 
 import db
 import research
@@ -24,6 +26,10 @@ def chunks(text, limit=3500):
     if limit < 2:
         raise ValueError('Message limit must be at least two UTF-16 units')
     text = str(text)
+    if text.startswith('Skin Research · ') and text.count('\n\n• ') > 5:
+        header, *items = text.split('\n\n• ')
+        return [part for offset in range(0, len(items), 5)
+                for part in chunks(header + '\n\n• ' + '\n\n• '.join(items[offset:offset+5]), limit)]
     result = []
     while text:
         if utf16_length(text) <= limit:
@@ -72,20 +78,38 @@ def api(method, payload):
 
 
 def send(chat_id, text):
-    return api('sendMessage', {'chat_id': chat_id, 'text': text, 'disable_web_page_preview': True})
+    payload = {'chat_id': chat_id, 'text': text, 'disable_web_page_preview': True}
+    if text.startswith('Skin Research · '):
+        entities = []
+        bullets = list(re.finditer(r'^• ([^\n]+)', text, re.MULTILINE))
+        for index, match in enumerate(bullets):
+            end = bullets[index+1].start() if index+1 < len(bullets) else len(text)
+            url = re.search(r'^https?://\S+', text[match.end():end], re.MULTILINE)
+            if url:
+                entities.append({'type':'text_link', 'offset':utf16_length(text[:match.start(1)]),
+                                 'length':utf16_length(match.group(1)), 'url':url.group()})
+        if entities:
+            payload['entities'] = entities
+    return api('sendMessage', payload)
 
 
 def format_digest(day, content):
     parts = [f'Skin Research · {day}']
     if not content.get('items'):
         parts.append(content.get('message', 'Сегодня значимых обновлений нет.'))
-    for item in content.get('items', []):
-        parts.append('\n' + str(item.get('title', '')))
-        for key, label in (('summary', 'Что узнали'), ('significance', 'Что это значит для ухода'), ('limitations', 'Ограничения')):
-            if item.get(key):
-                parts.append(label + ': ' + str(item[key]))
-        parts.extend(str(source.get('url', '')) for source in item.get('sources', []))
-    return '\n'.join(parts)
+    items = content.get('items', [])
+    if items:
+        parts.append('Материалов в дайджесте: ' + str(len(items)))
+    for item in items:
+        lines = ['• ' + str(item.get('summary') or item.get('title', ''))]
+        if item.get('limitations'):
+            lines.append(str(item['limitations']))
+        for source in item.get('sources', []):
+            url = str(source.get('url', ''))
+            name = str(source.get('name') or urlparse(url).hostname or 'Источник')
+            lines.append(name + '\n' + url)
+        parts.append('\n'.join(lines))
+    return '\n\n'.join(parts)
 
 
 def format_answer(content):

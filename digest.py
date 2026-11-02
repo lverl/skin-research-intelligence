@@ -8,6 +8,7 @@ import db
 from db import jsonb as Jsonb
 
 EDITORIAL_VERSION = 2
+COMPACT_RULES = 'summary: 1-2 short Russian sentences, maximum 400 characters. limitations: one short Russian sentence only when essential. '
 
 
 def configured_zone():
@@ -45,13 +46,14 @@ def _generate(conn,now=None):
                             (0,now.date())).fetchone()[0] or now-timedelta(days=1))
         rows=conn.execute("SELECT m.id,m.title,m.url,f.summary,f.kind,f.details FROM findings f JOIN materials m ON m.id=f.material_id WHERE f.created_at>%s AND m.status='done' AND NOT EXISTS(SELECT 1 FROM digest_items di JOIN digests d ON d.id=di.digest_id WHERE di.material_id=m.id AND d.id<>%s AND d.created_at>=f.created_at) ORDER BY f.created_at DESC LIMIT 100",(since,existing[0] if existing else 0)).fetchall()
         candidates=[dict(zip(('id','title','url','summary','kind','details'),r)) for r in rows]
+        source_names=dict(conn.execute('SELECT m.id,s.name FROM materials m JOIN sources s ON s.id=m.source_id WHERE m.id=ANY(%s)',([r['id'] for r in candidates],)).fetchall()) if candidates else {}
         updates=conn.execute('SELECT topic,version,content,reason FROM conclusions WHERE created_at>%s ORDER BY created_at DESC LIMIT 30',(since,)).fetchall()
         changes=[dict(zip(('topic','version','content','reason'),r)) for r in updates]
         if existing and not legacy and not candidates and not changes:
             return existing[0]
         pending=conn.execute("SELECT count(*) FROM materials WHERE status IN ('new','failed')").fetchone()[0]
         if candidates:
-            result=llm.call(conn,'digest','Собери по-русски дайджест до 10 пунктов для обычных читательниц об уходе за кожей и косметологии. Приоритет: исследования на людях, безопасность, ингредиенты, готовые средства, домашний уход, процедуры, устройства, полезные новинки и экспертные материалы. Пропускай лабораторные протоколы, культуру клеток, опухолевую микросреду и опыты на животных без явной связи с уходом, указанной в источнике. Не переноси результаты животных или клеток на человека. Не заполняй выпуск ради количества: если подходящих материалов нет, верни items: []. title — короткий русский заголовок; summary — что узнали; significance — что это значит для ухода без выдуманных рекомендаций; limitations — ограничения, включая изучение только аннотации и доклиническую модель. Изменение научного вывода необязательно. Убирай повторы и перепечатки. Верни {items:[{material_ids:[int],title:str,summary:str,significance:str,limitations:str}]}. Используй только кандидатов, не добавляй фактов. Для мнений и рекламы указывай тип.',candidates)
+            result=llm.call(conn,'digest',COMPACT_RULES+'Собери по-русски дайджест до 10 пунктов для обычных читательниц об уходе за кожей и косметологии. Приоритет: исследования на людях, безопасность, ингредиенты, готовые средства, домашний уход, процедуры, устройства, полезные новинки и экспертные материалы. Пропускай лабораторные протоколы, культуру клеток, опухолевую микросреду и опыты на животных без явной связи с уходом, указанной в источнике. Не переноси результаты животных или клеток на человека. Не заполняй выпуск ради количества: если подходящих материалов нет, верни items: []. title — короткий русский заголовок; summary — что узнали; significance — что это значит для ухода без выдуманных рекомендаций; limitations — ограничения, включая изучение только аннотации и доклиническую модель. Изменение научного вывода необязательно. Убирай повторы и перепечатки. Верни {items:[{material_ids:[int],title:str,summary:str,significance:str,limitations:str}]}. Используй только кандидатов, не добавляй фактов. Для мнений и рекламы указывай тип.',candidates)
             items=result.get('items')
             allowed={r['id'] for r in candidates}
             if not isinstance(items,list) or len(items)>10:
@@ -62,7 +64,7 @@ def _generate(conn,now=None):
                 if not ids or any(type(i) is not int or i not in allowed or i in used for i in ids):
                     raise ValueError('Некорректные ссылки дайджеста')
                 used.update(ids)
-                item['sources']=[{'url':r['url'],'kind':r['kind']} for r in candidates if r['id'] in ids]
+                item['sources']=[{'url':r['url'],'kind':r['kind'],'name':source_names.get(r['id'],'')} for r in candidates if r['id'] in ids]
             check=llm.call(conn,'digest_verify','Проверь, что дайджест не добавляет неподтверждённых утверждений, не превращает отзывы/рекламу в доказательства, не содержит дублей и персональных назначений. Проверь полезность каждого пункта для обычных читательниц об уходе: исключены лабораторные протоколы без явно обоснованной связи с уходом; нет переноса результатов клеток или животных на человека; заголовки на русском; практический смысл не выдуман. Верни {valid:bool}.',{'items':items,'candidates':candidates})
             if check.get('valid') is not True:
                 raise ValueError('Дайджест не прошёл проверку')
