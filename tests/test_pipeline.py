@@ -17,7 +17,8 @@ class Result:
 class DigestDB:
     def __init__(self,candidates=(),existing=None,pending=0,existing_content=None,changes=()):
         self.candidates=candidates; self.existing=existing; self.pending=pending; self.saved=None
-        self.existing_content=existing_content if existing_content is not None else {'items':[{'title':'Already sent'}]}
+        self.existing_content=existing_content if existing_content is not None else {'items':[{'title':'Already sent'}],'editorial_version':2}
+        self.existing_content.setdefault('editorial_version',2)
         self.existing_at=datetime(2026,11,1,19,tzinfo=timezone.utc)
         self.changes=changes
         self.refreshed=False
@@ -64,7 +65,7 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(conn.refreshed)
         self.assertIsNone(conn.saved)
         candidate_call=next(args for sql,args in conn.calls if 'FROM findings f JOIN materials' in sql)
-        self.assertEqual(candidate_call,(conn.existing_at,))
+        self.assertEqual(candidate_call,(conn.existing_at,9))
 
     def test_empty_edition_refreshes_with_new_findings_same_id(self):
         conn=DigestDB([(4,'New product','https://example.org','Announcement','news',{})],existing=9,
@@ -99,7 +100,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(conn.saved['conclusion_updates'][0]['topic'],'RF')
 
     def test_conclusion_only_edition_is_nonempty_and_immutable(self):
-        conn=DigestDB(existing=9,existing_content={'items':[],'conclusion_updates':[{'topic':'RF'}]})
+        conn=DigestDB(existing=9,existing_content={'items':[],'items':[{'title':'????'}],'conclusion_updates':[{'topic':'RF'}]})
         with patch.object(llm,'call') as model:
             self.assertEqual(digest.generate(conn,self.now),9)
         model.assert_not_called()
@@ -136,6 +137,28 @@ class PipelineTests(unittest.TestCase):
             digest.generate(conn,self.now)
         self.assertIn('лимит',conn.saved['message'])
         self.assertNotIn('обновлений нет',conn.saved['message'])
+
+    def test_legacy_edition_rebuilt_once_even_without_new_candidates(self):
+        conn=DigestDB(existing=9,existing_content={'items':[{'title':'Mice'}],'revision':3,'editorial_version':1})
+        digest.generate(conn,self.now)
+        self.assertTrue(conn.refreshed)
+        self.assertEqual(conn.saved['editorial_version'],2)
+        self.assertEqual(conn.saved['revision'],4)
+        self.assertEqual(conn.saved['items'],[])
+        conn.refreshed=False
+        digest.generate(conn,self.now)
+        self.assertFalse(conn.refreshed)
+
+    def test_telegram_hides_versions_and_labels_reader_sections(self):
+        content={'items':[{'title':'Уход','summary':'Данные','significance':'Смысл','limitations':'Аннотация','sources':[{'url':'https://example.org','kind':'research'}]}],
+                 'conclusion_updates':[{'topic':'Клетки','version':1}]}
+        text=format_digest('2026-11-02',content)
+        self.assertIn('Что узнали: Данные',text)
+        self.assertIn('Что это значит для ухода: Смысл',text)
+        self.assertIn('Ограничения: Аннотация',text)
+        self.assertIn('https://example.org',text)
+        self.assertNotIn('версия',text)
+        self.assertNotIn('research',text)
 
     def test_empty_answer_never_calls_model(self):
         with patch.object(llm,'call') as model:

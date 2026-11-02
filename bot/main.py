@@ -80,10 +80,11 @@ def format_digest(day, content):
     if not content.get('items'):
         parts.append(content.get('message', 'Сегодня значимых обновлений нет.'))
     for item in content.get('items', []):
-        parts.append('\n' + '\n'.join(str(item.get(key, '')) for key in ('title', 'summary', 'significance', 'limitations')))
-        parts.extend(str(source.get('url', '')) + ' · ' + str(source.get('kind', '')) for source in item.get('sources', []))
-    for change in content.get('conclusion_updates', []):
-        parts.append('\nОбновлён вывод: ' + str(change['topic']) + ' · версия ' + str(change['version']))
+        parts.append('\n' + str(item.get('title', '')))
+        for key, label in (('summary', 'Что узнали'), ('significance', 'Что это значит для ухода'), ('limitations', 'Ограничения')):
+            if item.get(key):
+                parts.append(label + ': ' + str(item[key]))
+        parts.extend(str(source.get('url', '')) for source in item.get('sources', []))
     return '\n'.join(parts)
 
 
