@@ -17,8 +17,8 @@ class Result:
 class DigestDB:
     def __init__(self,candidates=(),existing=None,pending=0,existing_content=None,changes=()):
         self.candidates=candidates; self.existing=existing; self.pending=pending; self.saved=None
-        self.existing_content=existing_content if existing_content is not None else {'items':[{'title':'Already sent'}],'editorial_version':2}
-        self.existing_content.setdefault('editorial_version',2)
+        self.existing_content=existing_content if existing_content is not None else {'items':[{'title':'Already sent'}],'editorial_version':digest.EDITORIAL_VERSION}
+        self.existing_content.setdefault('editorial_version',digest.EDITORIAL_VERSION)
         self.existing_at=datetime(2026,11,1,19,tzinfo=timezone.utc)
         self.changes=changes
         self.refreshed=False
@@ -142,7 +142,7 @@ class PipelineTests(unittest.TestCase):
         conn=DigestDB(existing=9,existing_content={'items':[{'title':'Mice'}],'revision':3,'editorial_version':1})
         digest.generate(conn,self.now)
         self.assertTrue(conn.refreshed)
-        self.assertEqual(conn.saved['editorial_version'],2)
+        self.assertEqual(conn.saved['editorial_version'],digest.EDITORIAL_VERSION)
         self.assertEqual(conn.saved['revision'],4)
         self.assertEqual(conn.saved['items'],[])
         conn.refreshed=False
@@ -184,6 +184,31 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(result['claims'],[])
             self.assertTrue(result['missing_data'])
             model.assert_not_called()
+
+    def test_catalogues_and_individual_incidents_never_reach_digest_model(self):
+        rows=[(1,'Cream','https://world.openbeautyfacts.org/product/123','Claim','product',{}),
+              (2,'Incident','https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfmaude/detail.cfm?id=123','Report','regulatory',{}),
+              (3,'Launch','https://example.org/launch','Ad','commercial',{})]
+        conn=DigestDB(rows,existing=9,existing_content={'items':[{'title':'Old products'}],'editorial_version':2})
+        with patch.object(llm,'call') as model:
+            digest.generate(conn,self.now)
+        model.assert_not_called()
+        self.assertEqual(conn.saved['items'],[])
+        self.assertEqual(conn.saved['editorial_version'],digest.EDITORIAL_VERSION)
+
+    def test_official_recall_and_independent_product_research_remain_eligible(self):
+        for url,kind in [('https://www.fda.gov/safety/recalls-market-withdrawals-safety-alerts/example','regulatory'),
+                         ('https://europepmc.org/article/MED/123','research')]:
+            self.assertTrue(digest.digest_eligible({'url':url,'kind':kind}))
+
+    def test_generation_and_verification_receive_anti_advertising_rules(self):
+        conn=DigestDB([(4,'Study','https://example.org/study','Results','research',{})])
+        result={'items':[{'material_ids':[4],'summary':'Результаты'}]}
+        with patch.object(llm,'call',side_effect=[result,{'valid':True}]) as model:
+            digest.generate(conn,self.now)
+        self.assertEqual(model.call_count,2)
+        for call in model.call_args_list:
+            self.assertIn(digest.READER_RULES,call.args[2])
 
     def test_delivery_preserves_long_text_in_bounded_messages(self):
         text='x'*20000
