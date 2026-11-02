@@ -70,15 +70,30 @@ def _process_material(conn,row,force=False):
         synthesize(conn,topic)
 
 def process_new(conn):
-    for row in conn.execute("SELECT id,title,text,text_scope FROM materials WHERE status IN ('new','failed') AND attempts<3 ORDER BY id LIMIT 30").fetchall():
+    issues=llm.configuration_issues()
+    if issues:
+        db.log('worker','Обработка приостановлена: '+'; '.join(issues)+'. Исправьте Environment Variables в Coolify.')
+        return
+    # Earlier versions exhausted retries even when MODEL or its key was missing.
+    conn.execute("UPDATE materials SET attempts=0,status='new',last_error=NULL WHERE status='failed' AND last_error='RuntimeError'")
+    pending=conn.execute("SELECT id,title,text,text_scope FROM materials WHERE status IN ('new','failed') AND attempts<3 ORDER BY id LIMIT 30").fetchall()
+    if not pending:
+        counts=conn.execute("SELECT count(*) FILTER(WHERE status='done'),count(*) FILTER(WHERE status='failed') FROM materials").fetchone()
+        db.log('worker',f'Очередь без новых задач: обработано {counts[0]}, ошибок {counts[1]}')
+        return
+    for row in pending:
+        db.log('worker',f'Разбор материала {row[0]}')
         conn.execute('UPDATE materials SET attempts=attempts+1 WHERE id=%s',(row[0],))
         try:
             process_material(conn,row)
+            db.log('worker',f'Материал {row[0]}: этап обработки завершён')
         except llm.BudgetExceeded:
             conn.execute('UPDATE materials SET attempts=attempts-1 WHERE id=%s',(row[0],))
             raise
         except Exception as error:
-            conn.execute("UPDATE materials SET status='failed',last_error=%s WHERE id=%s",(type(error).__name__,row[0]))
+            reason=llm.safe_error(error)
+            conn.execute("UPDATE materials SET status='failed',last_error=%s WHERE id=%s",(reason,row[0]))
+            db.log('worker',f'Материал {row[0]}: '+reason)
 
 def main():
     from collector.main import collect

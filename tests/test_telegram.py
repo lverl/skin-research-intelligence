@@ -45,13 +45,14 @@ class TelegramDB:
         elif 'SELECT id,day,content FROM digests' in sql:
             return Result(self.digest)
         elif 'INSERT INTO digest_deliveries' in sql:
-            self.deliveries.setdefault(args, {'status': 'pending', 'next': 0})
-        elif 'SELECT status,next_part FROM digest_deliveries' in sql:
+            self.deliveries.setdefault(args, {'status': 'pending', 'next': 0,'revision':1})
+        elif 'SELECT status,next_part,revision FROM digest_deliveries' in sql:
             row = self.deliveries[args]
-            return Result([(row['status'], row['next'])])
+            return Result([(row['status'], row['next'],row['revision'])])
         elif 'UPDATE digest_deliveries' in sql:
             row = self.deliveries[args[-2:]]
-            if 'next_part=' in sql: row.update(status='sending', next=args[0])
+            if 'SET revision=' in sql: row.update(status='pending',next=0,revision=args[0])
+            elif 'next_part=' in sql: row.update(status='sending', next=args[0])
             elif "status='sent'" in sql: row['status'] = 'sent'
             else: row['status'] = 'failed'
         return Result()
@@ -157,6 +158,19 @@ class TelegramTests(unittest.TestCase):
             bot.process_updates(conn)
         self.assertEqual(send.call_count,1)
         self.assertEqual(conn.updates[1]['status'],'abandoned')
+
+    def test_refreshed_digest_is_delivered_after_waiting_status(self):
+        conn=TelegramDB()
+        conn.digest=[(7,'2026-11-02',{'items':[],'message':'Waiting'})]
+        with patch.object(bot,'send') as send:
+            bot.deliver(conn)
+            bot.deliver(conn)
+            self.assertEqual(send.call_count,1)
+            conn.digest=[(7,'2026-11-02',{'items':[],'message':'New findings','revision':2})]
+            bot.deliver(conn)
+            bot.deliver(conn)
+            self.assertEqual(send.call_count,2)
+            self.assertIn('New findings',send.call_args.args[1])
 
 
 if __name__ == '__main__':

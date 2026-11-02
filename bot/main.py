@@ -122,7 +122,11 @@ def deliver(conn):
     for did, day, content in conn.execute('SELECT id,day,content FROM digests WHERE day >= CURRENT_DATE-1 ORDER BY day').fetchall():
         for chat in sorted(chats):
             conn.execute('INSERT INTO digest_deliveries(digest_id,chat_id) VALUES (%s,%s) ON CONFLICT DO NOTHING', (did, chat))
-            state, next_part = conn.execute('SELECT status,next_part FROM digest_deliveries WHERE digest_id=%s AND chat_id=%s', (did, chat)).fetchone()
+            state, next_part, delivered_revision = conn.execute('SELECT status,next_part,revision FROM digest_deliveries WHERE digest_id=%s AND chat_id=%s', (did, chat)).fetchone()
+            revision=int(content.get('revision',1))
+            if delivered_revision!=revision:
+                conn.execute("UPDATE digest_deliveries SET revision=%s,next_part=0,status='pending',error=NULL WHERE digest_id=%s AND chat_id=%s",(revision,did,chat))
+                state,next_part='pending',0
             if state in ('sent','abandoned'):
                 continue
             try:
@@ -157,7 +161,15 @@ def command_response(conn, chat_id, text, chat_type='private'):
         return HELP
     if command == '/status':
         materials, findings, pending = conn.execute("SELECT (SELECT count(*) FROM materials),(SELECT count(*) FROM findings),(SELECT count(*) FROM materials WHERE status IN ('new','failed'))").fetchone()
-        return f'В базе материалов: {materials}.\nРазобрано: {findings}.\nОжидают разбора или повторной попытки: {pending}.'
+        import llm
+        lines=[f'В базе материалов: {materials}.\nРазобрано: {findings}.\nОжидают разбора или повторной попытки: {pending}.']
+        issues=llm.configuration_issues()
+        if issues: lines.append('Настройки модели: '+'; '.join(issues))
+        for reason,count in conn.execute("SELECT last_error,count(*) FROM materials WHERE status='failed' GROUP BY last_error ORDER BY count(*) DESC LIMIT 5").fetchall():
+            lines.append(f'Ошибки обработки: {reason or "причина не записана"} — {count}')
+        for name,error in conn.execute('SELECT name,last_error FROM sources WHERE active AND last_error IS NOT NULL ORDER BY name LIMIT 5').fetchall():
+            lines.append('Источник '+name+': '+error)
+        return '\n\n'.join(lines)
     if command == '/digest':
         row = conn.execute('SELECT day,content FROM digests ORDER BY day DESC LIMIT 1').fetchone()
         return format_digest(*row) if row else 'Первый ежедневный дайджест ещё не сформирован.'

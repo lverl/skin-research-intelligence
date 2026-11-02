@@ -6,7 +6,7 @@ from contextlib import nullcontext
 from unittest.mock import patch
 
 from collector import adapters
-from collector.main import canonical_url, ingest, ingest_manual, normalize_doi
+from collector.main import canonical_url, ingest, ingest_manual, normalize_doi,collect
 
 
 class Result:
@@ -96,6 +96,31 @@ class CollectorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"Private"):
                 ingest_manual(Connection(), {"url":"http://127.0.0.1/secrets"})
         fetch.assert_called_once()
+
+    def test_failed_source_waits_before_retry_and_other_sources_continue(self):
+        from datetime import datetime,timezone
+        from unittest.mock import Mock
+        class SourcesDB:
+            def __init__(self): self.checked=None; self.error=None
+            def execute(self,sql,args=()):
+                if 'FROM sources WHERE active' in sql:
+                    return Result([(1,'Unavailable','rss','https://example.org/feed',{},24,self.checked,self.error),
+                                   (2,'Working','rss','https://example.org/ok',{},24,None,None)])
+                if 'SET last_error=%s,last_checked_at=now()' in sql:
+                    self.error=args[0]; self.checked=datetime.now(timezone.utc)
+                return Result([])
+        conn=SourcesDB()
+        attempts=[]
+        def reader(source,query):
+            attempts.append(source['name'])
+            if source['id']==1: raise TimeoutError()
+            return iter([])
+        with patch('collector.main.seed_sources'),patch('collector.main.db.start_run',return_value=1),patch('collector.main.db.finish_run'),patch('collector.main.db.log'),patch.dict('collector.main.READERS',{'rss':reader}):
+            first=collect(conn)
+            collect(conn)
+        self.assertEqual(first['failed_sources'],['Unavailable'])
+        self.assertEqual(attempts.count('Unavailable'),1)
+        self.assertEqual(attempts.count('Working'),2)
 
 
 if __name__ == "__main__":

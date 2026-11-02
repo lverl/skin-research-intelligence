@@ -149,11 +149,12 @@ def collect(conn, force=False, query=None):
     seed_sources(conn)
     run = db.start_run(conn, "collector")
     count, errors = 0, []
-    rows = conn.execute("""SELECT id,name,kind,url,config,interval_hours,last_checked_at
+    rows = conn.execute("""SELECT id,name,kind,url,config,interval_hours,last_checked_at,last_error
        FROM sources WHERE active AND kind <> 'manual' ORDER BY id""").fetchall()
-    for source_id,name,kind,url,config,interval,last_checked in rows:
+    for source_id,name,kind,url,config,interval,last_checked,last_error in rows:
         if not force and not query and last_checked:
-            if (datetime.now(timezone.utc) - last_checked).total_seconds() < interval * 3600:
+            wait_hours=min(interval,1) if last_error else interval
+            if (datetime.now(timezone.utc) - last_checked).total_seconds() < wait_hours * 3600:
                 continue
         config = json.loads(config) if isinstance(config,str) else config or {}
         source = {"id":source_id,"name":name,"kind":kind,"url":url,"config":config}
@@ -172,7 +173,7 @@ def collect(conn, force=False, query=None):
         except Exception as error:
             # A single failing source must not prevent all remaining sources.
             message = f"{type(error).__name__}: collection failed"
-            conn.execute("UPDATE sources SET last_error=%s WHERE id=%s",(message,source_id))
+            conn.execute("UPDATE sources SET last_error=%s,last_checked_at=now() WHERE id=%s",(message,source_id))
             errors.append(name)
             db.log("collector",f"{name}: {message}")
     note = f"Processed {count} records; failed sources: {', '.join(errors) or 'none'}"

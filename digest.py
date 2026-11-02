@@ -4,6 +4,7 @@ import os
 from datetime import datetime,timedelta,timezone
 from zoneinfo import ZoneInfo
 import llm
+import db
 from db import jsonb as Jsonb
 
 def configured_zone():
@@ -28,14 +29,21 @@ def _generate(conn,now=None):
         return None
     with conn.transaction():
         conn.execute('SELECT pg_advisory_xact_lock(4210)')
-        existing=conn.execute('SELECT id FROM digests WHERE day=%s',(now.date(),)).fetchone()
-        if existing:
+        existing=conn.execute('SELECT id,content,created_at FROM digests WHERE day=%s',(now.date(),)).fetchone()
+        if existing and (existing[1].get('items') or existing[1].get('conclusion_updates')):
             return existing[0]
-        since=conn.execute('SELECT max(created_at) FROM digests').fetchone()[0] or now-timedelta(days=1)
+        # Empty status editions can be replaced when processing catches up later
+        # the same day. Their own timestamp is the refresh watermark, otherwise
+        # every worker cycle would repeat the same paid digest generation.
+        since=(existing[2] if existing else
+               conn.execute('SELECT max(created_at) FROM digests WHERE id<>%s AND day<%s',
+                            (0,now.date())).fetchone()[0] or now-timedelta(days=1))
         rows=conn.execute("SELECT m.id,m.title,m.url,f.summary,f.kind,f.details FROM findings f JOIN materials m ON m.id=f.material_id WHERE f.created_at>%s AND m.status='done' AND NOT EXISTS(SELECT 1 FROM digest_items di JOIN digests d ON d.id=di.digest_id WHERE di.material_id=m.id AND d.created_at>=f.created_at) ORDER BY f.created_at DESC LIMIT 100",(since,)).fetchall()
         candidates=[dict(zip(('id','title','url','summary','kind','details'),r)) for r in rows]
         updates=conn.execute('SELECT topic,version,content,reason FROM conclusions WHERE created_at>%s ORDER BY created_at DESC LIMIT 30',(since,)).fetchall()
         changes=[dict(zip(('topic','version','content','reason'),r)) for r in updates]
+        if existing and not candidates and not changes:
+            return existing[0]
         pending=conn.execute("SELECT count(*) FROM materials WHERE status IN ('new','failed')").fetchone()[0]
         if candidates:
             result=llm.call(conn,'digest','Собери ежедневный дайджест до 10 пунктов. Отбирай безопасность, исследования, уточнения прежних знаний, новинки, экспертные материалы. Изменение научного вывода необязательно. Убирай повторы и перепечатки. Верни {items:[{material_ids:[int],title:str,summary:str,significance:str,limitations:str}]}. Используй только кандидатов, не добавляй фактов. Для мнений и рекламы указывай тип.',candidates)
@@ -56,8 +64,15 @@ def _generate(conn,now=None):
         else:
             items=[]
             used=set()
-        content={'items':items,'conclusion_updates':changes,'message':('Обновились выводы по темам.' if changes else '') if items or changes else ('Анализ части материалов ещё не завершён; значимые обновления пока не подтверждены.' if pending else 'Сегодня значимых обновлений нет.')}
-        did=conn.execute('INSERT INTO digests(day,content) VALUES (%s,%s) RETURNING id',(now.date(),Jsonb(content))).fetchone()[0]
+        revision=int(existing[1].get('revision',1))+1 if existing else 1
+        content={'items':items,'conclusion_updates':changes,'revision':revision,'message':('Обновились выводы по темам.' if changes else '') if items or changes else ('Анализ части материалов ещё не завершён; значимые обновления пока не подтверждены.' if pending else 'Сегодня значимых обновлений нет.')}
+        if existing:
+            did=existing[0]
+            conn.execute("UPDATE digests SET content=%s,status='ready',created_at=now() WHERE id=%s",(Jsonb(content),did))
+            db.log('digest',f'refreshed edition {did}; revision {revision}; items {len(items)}')
+        else:
+            did=conn.execute('INSERT INTO digests(day,content) VALUES (%s,%s) RETURNING id',(now.date(),Jsonb(content))).fetchone()[0]
+            db.log('digest',f'created edition {did}; revision {revision}; items {len(items)}')
         for mid in used:
-            conn.execute('INSERT INTO digest_items VALUES (%s,%s)',(did,mid))
+            conn.execute('INSERT INTO digest_items VALUES (%s,%s) ON CONFLICT DO NOTHING',(did,mid))
         return did

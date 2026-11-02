@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS digests(id SERIAL PRIMARY KEY,day DATE UNIQUE NOT NUL
 CREATE TABLE IF NOT EXISTS digest_items(digest_id INTEGER REFERENCES digests(id),material_id INTEGER REFERENCES materials(id),PRIMARY KEY(digest_id,material_id));
 CREATE TABLE IF NOT EXISTS digest_deliveries(digest_id INTEGER REFERENCES digests(id),chat_id BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',sent_at TIMESTAMPTZ,error TEXT,PRIMARY KEY(digest_id,chat_id));
 ALTER TABLE digest_deliveries ADD COLUMN IF NOT EXISTS next_part INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE digest_deliveries ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1;
 CREATE TABLE IF NOT EXISTS telegram_updates(update_id BIGINT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'pending',response JSONB NOT NULL DEFAULT '[]',chat_id BIGINT,next_part INTEGER NOT NULL DEFAULT 0);
 ALTER TABLE telegram_updates ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE telegram_updates ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
