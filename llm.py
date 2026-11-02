@@ -6,6 +6,8 @@ import urllib.error
 import db
 from decimal import Decimal
 
+MONTHLY_SPEND_SQL="SELECT coalesce(sum(coalesce(actual_usd,reserved_usd)),0) FROM model_calls WHERE created_at >= date_trunc('month',now())"
+
 class BudgetExceeded(RuntimeError):
     pass
 
@@ -44,7 +46,7 @@ def call(conn, stage, instructions, data):
     # Commit independently: a failed synthesis/digest must not undo paid-call accounting.
     with db.connect() as ledger, ledger.transaction():
         ledger.execute('SELECT pg_advisory_xact_lock(4209)')
-        used=ledger.execute("SELECT coalesce(sum(reserved_usd),0) FROM model_calls WHERE created_at >= date_trunc('month',now())").fetchone()[0]
+        used=ledger.execute(MONTHLY_SPEND_SQL).fetchone()[0]
         if used+reserve>ceiling:
             raise BudgetExceeded('Месячный лимит вызовов исчерпан')
         call_id=ledger.execute('INSERT INTO model_calls(stage,model,reserved_usd) VALUES (%s,%s,%s) RETURNING id',(stage,model,reserve)).fetchone()[0]
