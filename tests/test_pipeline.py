@@ -85,6 +85,9 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(result['missing_data'])
             model.assert_not_called()
 
-    def test_delivery_uses_one_bounded_message(self):
-        self.assertEqual(len(chunks('x'*20000)),1)
-        self.assertLessEqual(len(chunks('x'*20000)[0]),3500)
+    def test_delivery_preserves_long_text_in_bounded_messages(self):
+        text='x'*20000
+        parts=chunks(text)
+        self.assertGreater(len(parts),1)
+        self.assertEqual(''.join(parts),text)
+        self.assertTrue(all(len(part.encode('utf-16-le'))//2<=3500 for part in parts))

@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS corrections(id SERIAL PRIMARY KEY,material_id INTEGER
 CREATE TABLE IF NOT EXISTS digests(id SERIAL PRIMARY KEY,day DATE UNIQUE NOT NULL,status TEXT NOT NULL DEFAULT 'ready',content JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS digest_items(digest_id INTEGER REFERENCES digests(id),material_id INTEGER REFERENCES materials(id),PRIMARY KEY(digest_id,material_id));
 CREATE TABLE IF NOT EXISTS digest_deliveries(digest_id INTEGER REFERENCES digests(id),chat_id BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',sent_at TIMESTAMPTZ,error TEXT,PRIMARY KEY(digest_id,chat_id));
+ALTER TABLE digest_deliveries ADD COLUMN IF NOT EXISTS next_part INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS telegram_updates(update_id BIGINT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'pending',response JSONB NOT NULL DEFAULT '[]',chat_id BIGINT,next_part INTEGER NOT NULL DEFAULT 0);
+ALTER TABLE telegram_updates ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE telegram_updates ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS telegram_state(key TEXT PRIMARY KEY,value BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS model_calls(id SERIAL PRIMARY KEY,stage TEXT NOT NULL,model TEXT NOT NULL,reserved_usd NUMERIC NOT NULL,actual_usd NUMERIC,created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 -- Preserve original AI data, but never collect it for the new product.
 UPDATE sources SET active=FALSE WHERE kind IN ('hn','arxiv') OR name IN ('Хабр: ИИ','Sostav','New Retail');

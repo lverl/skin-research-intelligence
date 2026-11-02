@@ -1,0 +1,21 @@
+# Optional dashboard. Default deployment uses Telegram and needs no public domain.
+services:
+  web:
+    build: .
+    command: [python, main.py, web]
+    environment:
+      DATABASE_URL: postgresql://skin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/skin_research
+      PORT: '8000'
+      APP_TOKEN: ${SERVICE_PASSWORD_APP}
+      ADMIN_TOKEN: ${SERVICE_PASSWORD_ADMIN}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MODEL: ${MODEL:-}
+      MODEL_MONTHLY_USD: ${MODEL_MONTHLY_USD:-0}
+      MODEL_CALL_RESERVE_USD: ${MODEL_CALL_RESERVE_USD:-1}
+      NCBI_API_KEY: ${NCBI_API_KEY:-}
+      OPENFDA_API_KEY: ${OPENFDA_API_KEY:-}
+      MFDS_API_KEY: ${MFDS_API_KEY:-}
+    expose: ['8000']
+    depends_on:
+      postgres:
+        condition: service_healthy
