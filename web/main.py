@@ -89,13 +89,14 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return telegram_id
 
-    def respond(self, status, value, content_type='application/json; charset=utf-8'):
+    def respond(self, status, value, content_type='application/json; charset=utf-8', frameable=False):
         body = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, default=str).encode()
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('X-Frame-Options', 'DENY')
+        if not frameable:
+            self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Referrer-Policy', 'same-origin')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -118,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlsplit(self.path)
         if parsed.path == '/miniapp':
-            self.respond(200, MINIAPP_PAGE.read_bytes(), 'text/html; charset=utf-8')
+            self.respond(200, MINIAPP_PAGE.read_bytes(), 'text/html; charset=utf-8', frameable=True)
             return
         if parsed.path == '/health':
             try:
