@@ -12,6 +12,7 @@ import db
 
 MAX_BODY = 8 * 1024 * 1024
 PAGE = Path(__file__).with_name('index.html')
+MINIAPP_PAGE = Path(__file__).with_name('miniapp.html')
 
 
 def authorized(header, token):
@@ -60,6 +61,34 @@ def list_materials(conn, query):
 class Handler(BaseHTTPRequestHandler):
     server_version = 'SkinResearch'
 
+    def miniapp_user(self):
+        from web.telegram_auth import validate_init_data
+        try:
+            user = validate_init_data(self.headers.get('X-Telegram-Init-Data', ''))
+        except RuntimeError:
+            self.respond(503, {'error': 'Telegram Mini App не настроен на сервере'})
+            return None
+        except ValueError as error:
+            self.respond(401, {'error': str(error)})
+            return None
+
+        owner = os.environ.get('OWNER_TELEGRAM_ID', '').strip()
+        if not owner.isdigit() or int(owner) <= 0:
+            self.respond(503, {'error': 'Владелец Mini App ещё не настроен'})
+            return None
+        telegram_id = user['id']
+        if telegram_id != int(owner):
+            self.respond(403, {'error': 'Доступ к Mini App пока разрешён только владелице'})
+            return None
+        with db.connect() as conn:
+            participant = conn.execute(
+                'SELECT role,active,miniapp_enabled FROM participants WHERE telegram_id=%s',
+                (telegram_id,)).fetchone()
+        if not participant or participant != ('owner', True, True):
+            self.respond(403, {'error': 'Учётная запись Mini App не активна'})
+            return None
+        return telegram_id
+
     def respond(self, status, value, content_type='application/json; charset=utf-8'):
         body = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, default=str).encode()
         self.send_response(status)
@@ -88,6 +117,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlsplit(self.path)
+        if parsed.path == '/miniapp':
+            self.respond(200, MINIAPP_PAGE.read_bytes(), 'text/html; charset=utf-8')
+            return
         if parsed.path == '/health':
             try:
                 with db.connect() as conn:
@@ -95,6 +127,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'status': 'ok'})
             except Exception:
                 self.respond(503, {'status': 'unavailable'})
+            return
+        if parsed.path.startswith('/api/miniapp/'):
+            telegram_id = self.miniapp_user()
+            if telegram_id is None:
+                return
+            try:
+                with db.connect() as conn:
+                    if parsed.path == '/api/miniapp/session':
+                        data = {'telegram_id': telegram_id, 'role': 'owner'}
+                    elif parsed.path == '/api/miniapp/answers':
+                        data = rows(conn, 'SELECT id,question,content,created_at FROM answers WHERE owner_telegram_id=%s ORDER BY created_at DESC LIMIT 50', (telegram_id,))
+                    elif parsed.path == '/api/miniapp/feed':
+                        data = rows(conn, """SELECT m.id,m.title,m.url,m.text_scope,m.published_at,m.collected_at,
+                            f.summary,f.kind,f.topics,s.name AS source
+                            FROM materials m LEFT JOIN findings f ON f.material_id=m.id
+                            LEFT JOIN sources s ON s.id=m.source_id
+                            WHERE m.status IN ('done','new') ORDER BY m.collected_at DESC LIMIT 50""")
+                    elif parsed.path == '/api/miniapp/saved':
+                        data = rows(conn, """SELECT m.id,m.title,m.url,m.text_scope,m.collected_at,f.summary,f.kind,s.name AS source,sm.saved_at
+                            FROM saved_materials sm JOIN materials m ON m.id=sm.material_id
+                            LEFT JOIN findings f ON f.material_id=m.id LEFT JOIN sources s ON s.id=m.source_id
+                            WHERE sm.owner_telegram_id=%s ORDER BY sm.saved_at DESC LIMIT 100""", (telegram_id,))
+                    else:
+                        self.respond(404, {'error': 'Страница не найдена'}); return
+                self.respond(200, data)
+            except Exception:
+                self.respond(500, {'error': 'Не удалось загрузить личные данные'})
             return
         if not self.authenticate():
             return
@@ -135,6 +194,48 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
+        if path.startswith('/api/miniapp/'):
+            telegram_id = self.miniapp_user()
+            if telegram_id is None:
+                return
+            origin = self.headers.get('Origin')
+            if origin and urlsplit(origin).netloc != self.headers.get('Host'):
+                self.respond(403, {'error': 'Запрос с другого сайта запрещён'}); return
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= MAX_BODY:
+                    self.respond(413, {'error': 'Запрос должен быть не больше 8 МБ'}); return
+                if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+                    self.respond(415, {'error': 'Нужен формат JSON'}); return
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError('Нужен объект JSON')
+                with db.connect() as conn:
+                    if path == '/api/miniapp/ask':
+                        question = payload.get('question', '')
+                        if not isinstance(question, str) or not question.strip() or len(question) > 2000:
+                            raise ValueError('Введите вопрос длиной до 2000 знаков')
+                        from research import answer
+                        data = answer(conn, question.strip(), owner_telegram_id=telegram_id)
+                    elif path == '/api/miniapp/save':
+                        try:
+                            material_id = int(payload.get('material_id'))
+                        except (ValueError, TypeError):
+                            raise ValueError('Некорректный материал') from None
+                        saved = conn.execute('INSERT INTO saved_materials(owner_telegram_id,material_id) SELECT %s,id FROM materials WHERE id=%s ON CONFLICT DO NOTHING RETURNING material_id', (telegram_id, material_id)).fetchone()
+                        if not saved:
+                            exists = conn.execute('SELECT 1 FROM materials WHERE id=%s', (material_id,)).fetchone()
+                            if not exists:
+                                raise ValueError('Материал не найден')
+                        data = {'material_id': material_id, 'saved': True}
+                    else:
+                        self.respond(404, {'error': 'Действие не найдено'}); return
+                self.respond(200, data)
+            except (ValueError, json.JSONDecodeError) as error:
+                self.respond(400, {'error': str(error)[:200]})
+            except Exception:
+                self.respond(500, {'error': 'Не удалось обработать вопрос. Попробуйте позже.'})
+            return
         if not self.authenticate(admin=path != '/api/ask'): return
         origin = self.headers.get('Origin')
         if origin and urlsplit(origin).netloc != self.headers.get('Host'):
@@ -202,7 +303,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    if len(os.environ.get('APP_TOKEN', '')) < 16:
+    app_token = os.environ.get('APP_TOKEN', '')
+    if app_token and len(app_token) < 16:
         raise RuntimeError('Set APP_TOKEN to a private token of at least 16 characters')
     with db.connect() as conn:
         db.init_schema(conn)

@@ -6,6 +6,10 @@ upstream/
 downloads/
 .local-postgres/
 .codex/
+_temp/screenshots/
+_temp/scratch/
+SRI_FINAL.zip
+docs/incoming/
 Picture1.png
 Picture3.png
 Picture2.png

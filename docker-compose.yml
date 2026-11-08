@@ -36,6 +36,8 @@ services:
       DATABASE_URL: postgresql://skin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/skin_research
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
       TELEGRAM_CHAT_IDS: ${TELEGRAM_CHAT_IDS:-}
+      WEBAPP_URL: ${WEBAPP_URL:-${SERVICE_URL_WEB_8000:-}}
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       MODEL: ${MODEL:-}
       MODEL_MONTHLY_USD: ${MODEL_MONTHLY_USD:-0}
@@ -43,6 +45,28 @@ services:
       NCBI_API_KEY: ${NCBI_API_KEY:-}
       OPENFDA_API_KEY: ${OPENFDA_API_KEY:-}
       MFDS_API_KEY: ${MFDS_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  web:
+    build: .
+    command: [python, main.py, web]
+    environment:
+      DATABASE_URL: postgresql://skin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/skin_research
+      PORT: '8000'
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-}
+      SERVICE_URL_WEB_8000: /miniapp
+      WEBAPP_URL: ${WEBAPP_URL:-${SERVICE_URL_WEB_8000:-}}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MODEL: ${MODEL:-}
+      MODEL_MONTHLY_USD: ${MODEL_MONTHLY_USD:-0}
+      MODEL_CALL_RESERVE_USD: ${MODEL_CALL_RESERVE_USD:-1}
+      NCBI_API_KEY: ${NCBI_API_KEY:-}
+      OPENFDA_API_KEY: ${OPENFDA_API_KEY:-}
+      MFDS_API_KEY: ${MFDS_API_KEY:-}
+    expose: ['8000']
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,10 +1,16 @@
 .venv
 .env
 .codex
+.git
+.git/**
+_temp
 upstream
 __pycache__
 downloads
 .local-postgres
+docs
+*.md
+*.zip
 Picture1.png
 Picture3.png
 Picture2.png

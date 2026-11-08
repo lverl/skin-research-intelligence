@@ -34,7 +34,7 @@ def synthesize(conn,topic):
             return
         conn.execute('INSERT INTO conclusions(topic,version,content,reason) VALUES (%s,%s,%s,%s)',(topic,old[0]+1 if old else 1,Jsonb(result),'Новые или обновлённые проверенные факты; предыдущая версия сохранена'))
 
-def answer(conn,question):
+def answer(conn,question,owner_telegram_id=None):
     if not isinstance(question,str) or not question.strip() or len(question)>2000:
         raise ValueError('Вопрос должен содержать от 1 до 2000 символов')
     from collector.main import search
@@ -59,5 +59,6 @@ def answer(conn,question):
             status.append('Дополнительный поиск или анализ не завершён: '+type(error).__name__)
     result=grounded(conn,'answer',question,facts)
     result.setdefault('limitations',[]).extend(status)
-    conn.execute('INSERT INTO answers(question,content) VALUES (%s,%s)',(question,Jsonb(result)))
+    conn.execute('INSERT INTO answers(question,content,owner_telegram_id) VALUES (%s,%s,%s)',
+                 (question,Jsonb(result),owner_telegram_id))
     return result

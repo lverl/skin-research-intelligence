@@ -204,7 +204,7 @@ def command_response(conn, chat_id, text, chat_type='private'):
         return 'Пришлите вопрос текстом.'
     if len(text) > 2000:
         return 'Сократите вопрос до 2000 символов.'
-    return format_answer(research.answer(conn, text))
+    return format_answer(research.answer(conn, text, owner_telegram_id=chat_id))
 
 
 def enqueue_updates(conn, updates):
@@ -284,6 +284,17 @@ def main():
                     continue
                 identity=api('getMe',{})
                 db.log('bot','Подключён @'+str(identity.get('username',''))+'; разрешённых чатов: '+str(len(configured_chats()))+'; ожидаю сообщения, /id доступна до настройки списка чатов')
+                miniapp_url=os.environ.get('WEBAPP_URL','').strip()
+                if miniapp_url:
+                    parsed=urlparse(miniapp_url)
+                    if parsed.scheme!='https' or not parsed.netloc:
+                        db.log('bot','WEBAPP_URL должен быть публичным HTTPS-адресом')
+                    else:
+                        try:
+                            api('setChatMenuButton', {'menu_button': {'type':'web_app','text':'Skin Research','web_app':{'url':miniapp_url}}})
+                            db.log('bot','Кнопка Mini App настроена')
+                        except Exception as error:
+                            db.log('bot','Не удалось настроить кнопку Mini App: '+type(error).__name__)
                 # Drain durable replies before waiting for additional updates.
                 process_updates(conn)
                 while True:

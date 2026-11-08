@@ -14,6 +14,12 @@ def init_schema(conn):
     with conn.transaction():
         conn.execute('SELECT pg_advisory_xact_lock(4207)')
         conn.execute(Path(__file__).with_name('schema.sql').read_text(encoding='utf-8'))
+        owner = os.environ.get('OWNER_TELEGRAM_ID', '').strip()
+        if owner.isdigit() and int(owner) > 0:
+            conn.execute("""INSERT INTO participants(telegram_id,role,active,miniapp_enabled)
+                VALUES (%s,'owner',TRUE,TRUE)
+                ON CONFLICT(telegram_id) DO UPDATE SET role='owner',active=TRUE,miniapp_enabled=TRUE""",
+                (int(owner),))
 
 def log(service, message):
     print(f'[{service}] {message}', flush=True)
