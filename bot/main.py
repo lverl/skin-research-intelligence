@@ -95,7 +95,7 @@ def send(chat_id, text):
 
 def format_digest(day, content):
     parts = [f'Skin Research · {day}']
-    if not content.get('items'):
+    if not content.get('items') or content.get('coverage_status') in {'partial','incomplete'}:
         parts.append(content.get('message', 'Сегодня значимых обновлений нет.'))
     items = content.get('items', [])
     if items:
@@ -107,6 +107,13 @@ def format_digest(day, content):
         for source in item.get('sources', []):
             url = str(source.get('url', ''))
             name = str(source.get('name') or urlparse(url).hostname or 'Источник')
+            if source.get('published_at'):
+                name+=' · публикация '+str(source['published_at'])[:4]+' года'
+            role=source.get('source_role')
+            if role in {'reference','professional_information'}: name+=' · справочный материал'
+            if role=='systematic_review_summary': name+=' · публичное резюме обзора'
+            if source.get('scope')=='abstract': name+=' · изучена аннотация'
+            elif source.get('scope')=='excerpt': name+=' · доступный фрагмент'
             lines.append(name + '\n' + url)
         parts.append('\n'.join(lines))
     return '\n\n'.join(parts)

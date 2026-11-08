@@ -17,6 +17,11 @@ from collector.adapters import READERS, plain_text
 
 SOURCES = Path(__file__).resolve().parent.parent / "sources.json"
 SCOPES = {"metadata": 0, "excerpt": 1, "abstract": 2, "full_text": 3}
+DAILY_TOPICS = (
+    'skin care ingredients topical evidence home care',
+    'cosmetic dermatology procedures laser radiofrequency devices evidence',
+    'skin care clinical research cosmetics product evidence updates',
+)
 
 
 def normalize_doi(value):
@@ -165,9 +170,14 @@ def collect(conn, force=False, query=None, *, purpose=None, scope_id=None, owner
     if purpose == "question" and scope_id is None and query:
         scope_id = question_scope(query, owner_telegram_id)
     count, errors, material_ids, checks = 0, [], [], []
+    daily_channel_selected=False
     rows = conn.execute("""SELECT id,name,kind,url,config,interval_hours,last_checked_at,last_error
        FROM sources WHERE active AND kind <> 'manual' ORDER BY id""").fetchall()
     for source_id,name,kind,url,config,interval,last_checked,last_error in rows:
+        if purpose=='daily':
+            if kind!='exa' or daily_channel_selected:
+                continue
+            daily_channel_selected=True
         # Runtime policy also applies to databases seeded with old active defaults.
         if kind in {"europe_pmc", "pubmed"} or not allowed_scientific_url(url):
             # Other historical channels continue monitoring, but not old biomedical APIs.
@@ -308,6 +318,60 @@ def search(conn, query, *, scope_id=None, owner_telegram_id=None):
         raise ValueError("Search query must contain 1–1000 characters")
     return collect(conn,force=True,query=query.strip(),purpose="question",scope_id=scope_id,
                    owner_telegram_id=owner_telegram_id)
+
+
+def run_daily_search(conn, now=None):
+    """One durable attempt per configured local calendar day; no HTTP under locks.
+
+    Questions and monitoring never touch this marker. A crash/timeout keeps the
+    claim: only the next day's scheduled attempt can send another daily search.
+    """
+    import os
+    from decimal import Decimal,InvalidOperation
+    from zoneinfo import ZoneInfo
+    zone_name=os.environ.get('DIGEST_TIMEZONE','Europe/Moscow')
+    zone=timezone.utc if zone_name=='UTC' else ZoneInfo(zone_name)
+    moment=now or datetime.now(zone)
+    moment=moment.replace(tzinfo=zone) if moment.tzinfo is None else moment.astimezone(zone)
+    day=moment.date()
+    scope_id='daily:'+day.isoformat()
+    topic_index=day.toordinal()%len(DAILY_TOPICS)
+    base={'day':day.isoformat(),'scope_id':scope_id,'topic_index':topic_index,
+          'material_ids':[],'checks':[],'run_id':None,'claimed':False}
+    try:
+        monthly=Decimal(os.environ.get('EXA_MONTHLY_USD','0'))
+        off=monthly.is_finite() and monthly==0
+    except (InvalidOperation,ValueError):
+        off=False
+    if off:
+        return dict(base,status='disabled',planned=False,complete=False,code='disabled',reason=ERROR_REASONS['disabled'])
+    with db.connect() as ledger,ledger.transaction():
+        inserted=ledger.execute("""INSERT INTO daily_search_runs(day,timezone,scope_id,topic_index,status)
+            VALUES(%s,%s,%s,%s,'claimed') ON CONFLICT(day) DO NOTHING RETURNING day""",
+            (day,zone_name,scope_id,topic_index)).fetchone()
+        if not inserted:
+            prior=ledger.execute('SELECT status,code,reason,run_id FROM daily_search_runs WHERE day=%s',(day,)).fetchone()
+            return dict(base,status='already_claimed',daily_status=prior[0] if prior else 'claimed',
+                        planned=True,complete=bool(prior and prior[0]=='completed'),
+                        code=prior[1] if prior else None,reason=prior[2] if prior else None,run_id=prior[3] if prior else None)
+    # The independent claim transaction is committed before entering collect.
+    try:
+        result=collect(conn,force=True,query=DAILY_TOPICS[topic_index],purpose='daily',scope_id=scope_id)
+        checks=result.get('checks',[])
+        complete=bool(checks) and all(c.get('planned',True) and c.get('complete',False) for c in checks)
+        status='completed' if complete else 'partial' if result.get('material_ids') else 'failed'
+        failed=next((c for c in checks if not c.get('complete',False)),None)
+        code=failed.get('code') if failed else None if complete else 'source_unavailable'
+        reason=failed.get('reason') if failed else None if complete else ERROR_REASONS['source_unavailable']
+    except Exception as error:
+        info=safe_error(error,'search')
+        result={}
+        complete,status,code,reason=False,'failed',info['code'],info['reason']
+    with db.connect() as ledger,ledger.transaction():
+        ledger.execute('''UPDATE daily_search_runs SET status=%s,code=%s,reason=%s,run_id=%s,finished_at=now()
+            WHERE day=%s''',(status,code,reason,result.get('run_id'),day))
+    return dict(base,**{key:value for key,value in result.items() if key not in {'scope_id'}},
+                status=status,planned=True,complete=complete,code=code,reason=reason,claimed=True)
 
 
 def main():

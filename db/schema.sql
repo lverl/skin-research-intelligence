@@ -62,6 +62,13 @@ CREATE INDEX IF NOT EXISTS source_checks_created ON source_checks(finished_at);
 ALTER TABLE source_checks ADD COLUMN IF NOT EXISTS planned BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE source_checks ADD COLUMN IF NOT EXISTS complete BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE source_checks ADD COLUMN IF NOT EXISTS code TEXT;
+-- Separate committed claim precedes any daily HTTP. No FK to outer collector runs.
+CREATE TABLE IF NOT EXISTS daily_search_runs(
+ day DATE PRIMARY KEY,timezone TEXT NOT NULL,scope_id TEXT UNIQUE NOT NULL,
+ topic_index INTEGER NOT NULL CHECK(topic_index BETWEEN 0 AND 2),
+ status TEXT NOT NULL CHECK(status IN ('claimed','completed','partial','failed')),
+ code TEXT,reason TEXT,run_id INTEGER,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),finished_at TIMESTAMPTZ);
 -- Preserve original AI data, but never collect it for the new product.
 UPDATE sources SET active=FALSE WHERE kind IN ('hn','arxiv') OR name IN ('Хабр: ИИ','Sostav','New Retail');
 -- Explicit approved replacement, including databases with old active defaults.

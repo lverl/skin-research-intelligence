@@ -148,7 +148,7 @@ def process_new(conn):
             db.log('worker',f'Материал {row[0]}: '+reason)
 
 def main():
-    from collector.main import collect
+    from collector.main import collect,run_daily_search
     from digest import generate
     db.log('worker','Сервис запущен: сбор и обработка каждые 60 секунд; время ежедневного выпуска '+os.environ.get('DIGEST_HOUR','19')+':00 '+os.environ.get('DIGEST_TIMEZONE','Europe/Moscow'))
     ready=False
@@ -160,6 +160,7 @@ def main():
                     db.log('worker','Подключение к БД установлено; MODEL '+('задан' if os.environ.get('MODEL') else 'не задан')+'; ключ модели '+('задан' if os.environ.get('OPENROUTER_API_KEY') else 'не задан')+'; месячный лимит '+os.environ.get('MODEL_MONTHLY_USD','0'))
                     ready=True
                 collect(conn)
+                run_daily_search(conn)
                 try:
                     process_new(conn)
                 finally:

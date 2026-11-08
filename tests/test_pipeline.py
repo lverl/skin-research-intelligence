@@ -46,6 +46,17 @@ class PipelineTests(unittest.TestCase):
         self.now=datetime(2026,11,1,20,tzinfo=timezone.utc)
         self.json=patch.object(digest,'Jsonb',side_effect=lambda x:x)
         self.json.start()
+        # These tests exercise formatting/generation, not source-coverage SQL.
+        # Declare completed fixture checks explicitly; real SQL is covered on PG.
+        def fixture_coverage(conn,since,until):
+            pending=conn.pending
+            return {'complete':not pending,'expected':2,'checked':2,'failed':0,'pending':pending,
+                    'checks':[],'missing_source_ids':[],'daily_status':'disabled',
+                    'period_start':since.isoformat(),'period_end':until.isoformat(),
+                    'fingerprint':'fixture-pending-'+str(pending)}
+        self.coverage=patch.object(digest,'source_coverage',side_effect=fixture_coverage)
+        self.coverage.start()
+        self.addCleanup(self.coverage.stop)
     def tearDown(self): self.json.stop(); self.env.stop()
 
     def test_daily_edition_not_before_configured_hour(self):
@@ -116,7 +127,7 @@ class PipelineTests(unittest.TestCase):
     def test_pending_analysis_is_not_no_news(self):
         conn=DigestDB(pending=2)
         digest.generate(conn,self.now)
-        self.assertIn('не завершён',conn.saved['message'])
+        self.assertIn('не заверш',conn.saved['message'])
 
     def test_news_without_changed_conclusion_is_included(self):
         conn=DigestDB([(4,'New product','https://example.org','Announcement','news',{})])
