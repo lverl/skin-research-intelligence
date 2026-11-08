@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from net import fetch
 
@@ -235,5 +235,113 @@ def mfds(source, query=None):
                "text": json.dumps(row, ensure_ascii=False), "text_scope": "full_text"}
 
 
+class PublicPage(PlainText):
+    """Small semantic HTML reader, not a site-specific browser/parser."""
+    def __init__(self):
+        super().__init__()
+        self.meta = {}
+        self.heading = []
+        self.title = []
+        self.content = []
+        self.in_content = 0
+        self.in_heading = False
+        self.in_title = False
+        self.paragraphs = 0
+
+    def handle_starttag(self, tag, attrs):
+        super().handle_starttag(tag, attrs)
+        attrs = dict(attrs)
+        if tag == "meta":
+            name = (attrs.get("name") or attrs.get("property") or "").lower()
+            if name and attrs.get("content"):
+                self.meta.setdefault(name, []).append(attrs["content"])
+        if tag in {"main", "article"}:
+            self.in_content += 1
+        if self.in_content and tag in {"p", "div", "br", "li", "h1", "h2", "h3"}:
+            self.content.append("\n")
+        if tag == "h1": self.in_heading = True
+        if tag == "title": self.in_title = True
+        if tag == "p": self.paragraphs += 1
+
+    def handle_endtag(self, tag):
+        super().handle_endtag(tag)
+        if tag in {"main", "article"}: self.in_content = max(0, self.in_content - 1)
+        if tag == "h1": self.in_heading = False
+        if tag == "title": self.in_title = False
+
+    def handle_data(self, data):
+        super().handle_data(data)
+        if not self.hidden:
+            if self.in_content: self.content.append(data)
+            if self.in_heading: self.heading.append(data)
+            if self.in_title: self.title.append(data)
+
+
+def direct_pages(source, query=None):
+    """Read a bounded, own-domain catalogue independent of any search provider.
+
+    Catalogue membership limits coverage; it is not a complete site search.
+    Returned HTML is an excerpt, even when the full response was downloaded.
+    """
+    from collector.exa import allowed_scientific_url
+    cfg = source.get("config", {})
+    domain = (cfg.get("domain") or urlsplit(source["url"]).hostname or "").lower()
+    role = cfg.get("source_role", "reference")
+    pages = cfg.get("pages", [])
+    if not isinstance(pages, list):
+        raise ValueError("Invalid public page catalogue")
+    for entry in pages[:min(10, max(1, int(cfg.get("limit", 5))))]:
+        page = {"url": entry} if isinstance(entry, str) else entry
+        if not isinstance(page, dict): continue
+        url = page.get("url")
+        if not allowed_scientific_url(url): continue
+        host = (urlsplit(url).hostname or "").lower()
+        if host != domain: continue
+        topics = page.get("topics", [])
+        if query and topics and not any(str(t).casefold() in query.casefold() for t in topics):
+            continue
+        try:
+            raw = fetch(url, url_policy=lambda target:
+                allowed_scientific_url(target) and (urlsplit(target).hostname or "").lower() == domain)
+            parser = PublicPage()
+            parser.feed(raw.decode("utf-8", errors="replace"))
+            meta = parser.meta
+            title = " ".join(parser.heading or parser.title).strip() or page.get("title") or url
+            body = re.sub(r"[ \t]+", " ", "".join(parser.content or parser.parts)).strip()
+            blocked = any(marker in (title + "\n" + body[:1500]).casefold() for marker in
+                ("just a moment", "access denied", "verify you are human", "enable javascript and cookies"))
+            readable = len(body) >= 80 and (bool(parser.content) or parser.paragraphs > 0) and not blocked
+            if readable and topics:
+                # A matching catalogue label cannot turn unrelated/loading HTML into evidence.
+                readable = any(str(t).casefold() in (title + "\n" + body).casefold() for t in topics)
+            text = body[:50000] if readable else ""
+            if query and not topics:
+                terms = [w.casefold() for w in re.findall(r"[\w-]{3,}", query)]
+                if terms and not any(t in (title + "\n" + text).casefold() for t in terms):
+                    continue
+            source.setdefault("checks", []).append({"url": url,
+                "status": "success" if readable else "no_text", "stage": "read",
+                "reason": "Проверен ограниченный каталог публичных страниц" if readable else
+                          "Доступный содержательный текст не получен"})
+            authors = meta.get("citation_author") or meta.get("author") or []
+            dates = meta.get("article:published_time") or meta.get("citation_publication_date") or []
+            yield {"url": url, "title": title, "text": text,
+                "text_scope": "excerpt" if readable else "metadata", "authors": "; ".join(authors) or None,
+                "published_at": date_value(dates[0].replace("/", "-")) if dates else None,
+                "doi": (meta.get("citation_doi") or [None])[0],
+                "pmid": (meta.get("citation_pmid") or [None])[0],
+                "source_role": page.get("source_role", role)}
+        except Exception:
+            # One page must not prevent the rest of this independent catalogue.
+            source.setdefault("checks", []).append({"url": url, "status": "failed",
+                "stage": "read", "reason": "Не удалось прочитать публичную страницу"})
+
+
+def exa_reader(source, query=None):
+    from collector.exa import read_exa
+    yield from read_exa(source, query)
+
+
 READERS = {"rss": rss, "europe_pmc": europe_pmc, "pubmed": pubmed, "crossref": crossref,
            "clinicaltrials": trials, "openfda": openfda, "beauty_facts": beauty_facts, "mfds": mfds}
+READERS.update({"direct_pages": direct_pages, "exa": exa_reader})

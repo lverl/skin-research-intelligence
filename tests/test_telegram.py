@@ -92,7 +92,7 @@ class TelegramTests(unittest.TestCase):
     def test_allowed_question_uses_research(self):
         with patch.object(bot.research, 'answer', return_value={'claims': [{'text': 'Результат'}], 'sources': []}) as answer:
             text = bot.command_response(None, 12, 'Что известно?')
-        answer.assert_called_once_with(None, 'Что известно?')
+        answer.assert_called_once_with(None, 'Что известно?', owner_telegram_id=12)
         self.assertIn('Результат', text)
 
     def test_replayed_update_uses_stored_answer(self):

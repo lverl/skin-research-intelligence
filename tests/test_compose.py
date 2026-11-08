@@ -54,10 +54,12 @@ class ComposeTests(unittest.TestCase):
         self.assertNotIn(':?Set',source)
 
     def test_coolify_does_not_claim_host_ports(self):
-        services=json.loads(self.config().stdout)['services']
+        result=self.config()
+        self.assertEqual(result.returncode,0,result.stderr)
+        services=json.loads(result.stdout)['services']
         for service in services.values(): self.assertFalse(service.get('ports'))
-        self.assertEqual(set(services),{'postgres','worker','bot'})
-        self.assertNotIn('web',services)
+        self.assertEqual(set(services),{'postgres','worker','bot','web'})
+        self.assertEqual([str(port) for port in services['web']['expose']],['8000'])
 
     def test_local_override_publishes_only_on_loopback(self):
         result=self.config(local=True,LOCAL_WEB_PORT='18000')

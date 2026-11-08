@@ -40,5 +40,24 @@ ALTER TABLE telegram_updates ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL 
 ALTER TABLE telegram_updates ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS telegram_state(key TEXT PRIMARY KEY,value BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS model_calls(id SERIAL PRIMARY KEY,stage TEXT NOT NULL,model TEXT NOT NULL,reserved_usd NUMERIC NOT NULL,actual_usd NUMERIC,created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS source_role TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE material_sources ADD COLUMN IF NOT EXISTS source_role TEXT NOT NULL DEFAULT 'unknown';
+-- Exa reservation commits on a separate connection: no FK to uncommitted runs.
+CREATE TABLE IF NOT EXISTS search_calls(
+ id BIGSERIAL PRIMARY KEY,scope_id TEXT NOT NULL,purpose TEXT NOT NULL CHECK(purpose IN ('question','daily')),
+ operation TEXT NOT NULL CHECK(operation IN ('search','contents')),run_id INTEGER,
+ reserved_usd NUMERIC NOT NULL CHECK(reserved_usd>0),actual_usd NUMERIC CHECK(actual_usd>=0),
+ status TEXT NOT NULL DEFAULT 'reserved' CHECK(status IN ('reserved','completed','failed','unknown')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),finished_at TIMESTAMPTZ);
+CREATE INDEX IF NOT EXISTS search_calls_month ON search_calls(created_at);
+CREATE INDEX IF NOT EXISTS search_calls_scope ON search_calls(scope_id);
+CREATE TABLE IF NOT EXISTS source_checks(
+ id BIGSERIAL PRIMARY KEY,run_id INTEGER REFERENCES runs(id),source_id INTEGER REFERENCES sources(id),
+ purpose TEXT NOT NULL,scope_id TEXT,status TEXT NOT NULL,stage TEXT NOT NULL,reason TEXT,
+ details JSONB NOT NULL DEFAULT '{}',started_at TIMESTAMPTZ NOT NULL DEFAULT now(),finished_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS source_checks_created ON source_checks(finished_at);
 -- Preserve original AI data, but never collect it for the new product.
 UPDATE sources SET active=FALSE WHERE kind IN ('hn','arxiv') OR name IN ('Хабр: ИИ','Sostav','New Retail');
+-- Explicit approved replacement, including databases with old active defaults.
+-- Preserve every previous document and all administrator configuration fields.
+UPDATE sources SET active=FALSE WHERE kind IN ('europe_pmc','pubmed');

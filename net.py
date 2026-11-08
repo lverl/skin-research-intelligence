@@ -22,8 +22,12 @@ class Redirects(urllib.request.HTTPRedirectHandler):
         validate_url(newurl)
         return super().redirect_request(req,fp,code,msg,headers,newurl)
 
-def fetch(url, limit=8_000_000):
+def fetch(url, limit=8_000_000, *, url_policy=None):
     for _ in range(6):
+        # A channel may narrow public URLs further. Recheck each redirect before
+        # DNS/HTTP; the existing public-address guard always remains in force.
+        if url_policy is not None and not url_policy(url):
+            raise ValueError('URL запрещён правилами источника')
         validate_url(url)
         parts=urllib.parse.urlsplit(url)
         port=parts.port or (443 if parts.scheme=='https' else 80)

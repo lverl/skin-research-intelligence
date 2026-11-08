@@ -25,9 +25,15 @@ class PostgresTests(unittest.TestCase):
                      'text_scope':'abstract'},**changes)
 
     def test_seed_preserves_admin_settings(self):
-        from collector.main import seed_sources
+        import json
+        from collector.main import seed_sources,SOURCES
         seed_sources(self.conn)
-        self.assertEqual(self.conn.execute('SELECT count(*) FROM sources').fetchone()[0],12)
+        expected_names={row['name'] for row in json.loads(SOURCES.read_text(encoding='utf-8'))}
+        actual_names={row[0] for row in self.conn.execute('SELECT name FROM sources').fetchall()}
+        self.assertTrue(expected_names.issubset(actual_names))
+        self.conn.execute("""INSERT INTO sources(name,kind,url,active,interval_hours)
+                             VALUES ('Europe PMC','europe_pmc','https://europepmc.org',FALSE,72)
+                             ON CONFLICT(name) DO NOTHING""")
         self.conn.execute("UPDATE sources SET active=FALSE,interval_hours=72 WHERE name='Europe PMC'")
         seed_sources(self.conn)
         self.assertEqual(self.conn.execute("SELECT active,interval_hours FROM sources WHERE name='Europe PMC'").fetchone(),(False,72))
