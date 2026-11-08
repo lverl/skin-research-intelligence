@@ -4,12 +4,48 @@ import os
 import urllib.request
 import urllib.error
 import db
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 MONTHLY_SPEND_SQL="SELECT coalesce(sum(coalesce(actual_usd,reserved_usd)),0) FROM model_calls WHERE created_at >= date_trunc('month',now())"
+MONTHLY_BUDGET_SQL="""SELECT coalesce(sum(actual_usd),0),
+    coalesce(sum(CASE WHEN actual_usd IS NULL THEN reserved_usd ELSE 0 END),0),
+    count(CASE WHEN actual_usd IS NULL THEN 1 END)
+    FROM model_calls WHERE created_at >= date_trunc('month',now())"""
 
 class BudgetExceeded(RuntimeError):
     pass
+
+def budget_summary(conn):
+    """Read one snapshot of the existing budget accounting; never reserve or send."""
+    actual, unknown_reserved, unknown_calls = conn.execute(MONTHLY_BUDGET_SQL).fetchone()
+    actual = Decimal(str(actual))
+    unknown_reserved = Decimal(str(unknown_reserved))
+    accounted = actual + unknown_reserved
+
+    def setting(name, default):
+        try:
+            value = Decimal(os.environ.get(name, default))
+            return value if value.is_finite() else None
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    limit = setting('MODEL_MONTHLY_USD', '0')
+    reserve = setting('MODEL_CALL_RESERVE_USD', '1')
+    available = max(Decimal('0'), limit - accounted) if limit is not None else None
+    allowed = False
+    if limit is None or limit <= 0:
+        reason = 'Положительный месячный лимит не задан'
+    elif reserve is None or reserve <= 0:
+        reason = 'Положительный резерв одного вызова не задан'
+    elif accounted + reserve > limit:
+        reason = 'Недостаточно остатка для следующего резерва'
+    else:
+        allowed = True
+        reason = 'Остатка хватает на следующий резерв'
+    return {'actual_usd': actual, 'unknown_reserved_usd': unknown_reserved,
+            'unknown_calls': int(unknown_calls), 'accounted_usd': accounted,
+            'monthly_limit_usd': limit, 'next_reserve_usd': reserve,
+            'available_usd': available, 'allowed': allowed, 'reason': reason}
 
 def configuration_issues():
     issues=[]

@@ -2,9 +2,11 @@
 import os
 import unittest
 from contextlib import nullcontext
+from decimal import Decimal
 from unittest.mock import patch
 
 import bot.main as bot
+import llm
 
 
 class Result:
@@ -56,6 +58,21 @@ class TelegramDB:
             elif "status='sent'" in sql: row['status'] = 'sent'
             else: row['status'] = 'failed'
         return Result()
+
+
+class StatusDB:
+    def __init__(self): self.calls=[]
+    def execute(self,sql,args=()):
+        self.calls.append((sql,args))
+        if 'SELECT (SELECT count(*) FROM materials)' in sql:
+            return Result([(2,1,1)])
+        return Result()
+
+
+def budget_status_fixture():
+    return {'actual_usd':Decimal('5'),'unknown_reserved_usd':Decimal('5'),'unknown_calls':5,
+            'accounted_usd':Decimal('10'),'monthly_limit_usd':Decimal('10'),'next_reserve_usd':Decimal('1'),
+            'available_usd':Decimal('0'),'allowed':False,'reason':'Учтённая сумма и следующий резерв превышают лимит.'}
 
 
 class TelegramTests(unittest.TestCase):
@@ -171,6 +188,44 @@ class TelegramTests(unittest.TestCase):
             bot.deliver(conn)
             self.assertEqual(send.call_count,2)
             self.assertIn('New findings',send.call_args.args[1])
+
+    def test_status_financial_summary_is_visible_only_to_private_allowlisted_owner(self):
+        conn=StatusDB()
+        budget=budget_status_fixture()
+        with patch.dict(os.environ,{'OWNER_TELEGRAM_ID':'12','TELEGRAM_CHAT_IDS':'12','OPENROUTER_API_KEY':'testOnlyBudgetPrivateCanary'}), \
+                patch.object(llm,'configuration_issues',return_value=[]), \
+                patch.object(llm,'budget_summary',return_value=budget) as summary:
+            text=bot.command_response(conn,12,'/status')
+        summary.assert_called_once_with(conn)
+        self.assertIn('В базе материалов: 2',text)
+        self.assertIn('учёт приложения',text.lower())
+        self.assertIn('резерв',text.lower())
+        self.assertIn(budget['reason'],text)
+        self.assertNotIn('testOnlyBudgetPrivateCanary',text)
+
+    def test_status_other_allowlisted_user_does_not_read_or_show_budget(self):
+        conn=StatusDB()
+        with patch.dict(os.environ,{'OWNER_TELEGRAM_ID':'12','TELEGRAM_CHAT_IDS':'12,13'}), \
+                patch.object(llm,'configuration_issues',return_value=[]), \
+                patch.object(llm,'budget_summary',return_value=budget_status_fixture()) as summary:
+            text=bot.command_response(conn,13,'/status')
+        summary.assert_not_called()
+        self.assertIn('В базе материалов: 2',text)
+        self.assertNotIn('учёт приложения',text.lower())
+        self.assertNotIn('резерв',text.lower())
+
+    def test_status_group_missing_owner_and_non_allowlisted_owner_never_read_budget(self):
+        cases=({'OWNER_TELEGRAM_ID':'12','TELEGRAM_CHAT_IDS':'12','chat_type':'group'},
+               {'OWNER_TELEGRAM_ID':'','TELEGRAM_CHAT_IDS':'12','chat_type':'private'},
+               {'OWNER_TELEGRAM_ID':'12','TELEGRAM_CHAT_IDS':'13','chat_type':'private'})
+        for case in cases:
+            with self.subTest(case=case), patch.dict(os.environ,{key:value for key,value in case.items() if key!='chat_type'}), \
+                    patch.object(llm,'configuration_issues',return_value=[]), \
+                    patch.object(llm,'budget_summary',return_value=budget_status_fixture()) as summary:
+                text=bot.command_response(StatusDB(),12,'/status',case['chat_type'])
+            summary.assert_not_called()
+            self.assertNotIn('учёт приложения',text.lower())
+            self.assertNotIn('резерв',text.lower())
 
 
 if __name__ == '__main__':

@@ -194,6 +194,26 @@ HELP = ('Задайте вопрос об уходе, ингредиентах �
         '/digest — последний ежедневный дайджест\n/status — состояние базы\n/id — ваш ID для доступа\n/help — эта подсказка')
 
 
+def format_model_budget(summary):
+    def money(value):
+        if value is None:
+            return 'не задан'
+        text = format(value, 'f')
+        return '$' + (text.rstrip('0').rstrip('.') if '.' in text else text)
+
+    return '\n'.join((
+        'Бюджет модели за текущий месяц (учёт приложения):',
+        'Месячный лимит: ' + money(summary['monthly_limit_usd']),
+        'Известная стоимость: ' + money(summary['actual_usd']),
+        'Резервы с неизвестной стоимостью: ' + money(summary['unknown_reserved_usd'])
+            + ' (вызовов: ' + str(summary['unknown_calls']) + ')',
+        'Учитывается для лимита: ' + money(summary['accounted_usd']),
+        'Доступный остаток: ' + money(summary['available_usd']),
+        'Резерв следующего вызова: ' + money(summary['next_reserve_usd']),
+        'По бюджету сейчас: ' + ('вызов разрешён' if summary['allowed'] else 'вызов заблокирован'),
+        'Причина: ' + summary['reason']))
+
+
 def command_response(conn, chat_id, text, chat_type='private'):
     """Authorize before invoking research or exposing any stored material."""
     command = text.strip().split(maxsplit=1)[0].split('@')[0].lower() if text.strip() else ''
@@ -211,6 +231,12 @@ def command_response(conn, chat_id, text, chat_type='private'):
         lines=[f'В базе материалов: {materials}.\nРазобрано: {findings}.\nОжидают разбора или повторной попытки: {pending}.']
         issues=llm.configuration_issues()
         if issues: lines.append('Настройки модели: '+'; '.join(issues))
+        owner=os.environ.get('OWNER_TELEGRAM_ID','').strip()
+        if type(chat_id) is int and owner.isdigit() and int(owner)>0 and chat_id==int(owner):
+            try:
+                lines.append(format_model_budget(llm.budget_summary(conn)))
+            except Exception:
+                lines.append('Сводка бюджета модели временно недоступна.')
         for reason,count in conn.execute("SELECT last_error,count(*) FROM materials WHERE status='failed' GROUP BY last_error ORDER BY count(*) DESC LIMIT 5").fetchall():
             lines.append(f'Ошибки обработки: {reason or "причина не записана"} — {count}')
         for name,error in conn.execute('SELECT name,last_error FROM sources WHERE active AND last_error IS NOT NULL ORDER BY name LIMIT 5').fetchall():
