@@ -15,6 +15,16 @@ PAGE = Path(__file__).with_name('index.html')
 MINIAPP_PAGE = Path(__file__).with_name('miniapp.html')
 
 
+def request_error(error):
+    """Only local validation messages are safe to reflect into an HTTP response."""
+    messages={'Нужен объект JSON','Введите вопрос длиной до 2000 знаков','Некорректный материал',
+        'Материал не найден','Укажите HTTP(S) адрес источника','Проверьте настройки источника',
+        'Ключи и токены задаются только в окружении сервиса','Источник не найден',
+        'Введите исправленный пересказ до 20000 знаков','Разбор материала не найден'}
+    message=str(error)
+    return message if message in messages else 'Запрос не прошёл проверку. Проверьте введённые данные.'
+
+
 def authorized(header, token):
     if not token or not header:
         return False
@@ -180,7 +190,7 @@ class Handler(BaseHTTPRequestHandler):
                     data = rows(conn, 'SELECT id,day,status,content,created_at FROM digests ORDER BY day DESC LIMIT 30')
                 elif parsed.path == '/api/sources':
                     if not self.authenticate(admin=True): return
-                    data = rows(conn, 'SELECT id,name,kind,url,active,config,interval_hours,last_checked_at,last_error FROM sources ORDER BY id')
+                    data = rows(conn, 'SELECT id,name,kind,url,active,config,interval_hours,last_checked_at,last_error,deferred_at,deferred_code,deferred_reason FROM sources ORDER BY id')
                     for source in data: source['config'] = clean_config(source['config'])
                 elif parsed.path == '/api/runs':
                     if not self.authenticate(admin=True): return
@@ -233,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.respond(404, {'error': 'Действие не найдено'}); return
                 self.respond(200, data)
             except (ValueError, json.JSONDecodeError) as error:
-                self.respond(400, {'error': str(error)[:200]})
+                self.respond(400, {'error': request_error(error)})
             except Exception:
                 self.respond(500, {'error': 'Не удалось обработать вопрос. Попробуйте позже.'})
             return
@@ -273,8 +283,12 @@ class Handler(BaseHTTPRequestHandler):
                     # Config contains queries/options, never credentials; keep secrets in environment.
                     if clean_config(config) != config:
                         raise ValueError('Ключи и токены задаются только в окружении сервиса')
-                    changed = conn.execute('UPDATE sources SET active=%s,interval_hours=%s,config=%s,url=%s WHERE id=%s RETURNING id',
-                                           (active, interval, Jsonb(config), source_url, identifier)).fetchone()
+                    changed = conn.execute('''UPDATE sources SET active=%s,interval_hours=%s,config=%s,url=%s,
+                        deferred_at=CASE WHEN %s THEN NULL ELSE deferred_at END,
+                        deferred_code=CASE WHEN %s THEN NULL ELSE deferred_code END,
+                        deferred_reason=CASE WHEN %s THEN NULL ELSE deferred_reason END
+                        WHERE id=%s RETURNING id''',
+                                           (active, interval, Jsonb(config), source_url, active, active, active, identifier)).fetchone()
                     if not changed: raise ValueError('Источник не найден')
                     data = {'id': identifier, 'saved': True}
                 elif path == '/api/correct':
@@ -294,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(404, {'error': 'Действие не найдено'}); return
             self.respond(200, data)
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
-            self.respond(400, {'error': str(error)[:200]})
+            self.respond(400, {'error': request_error(error)})
         except Exception:
             self.respond(500, {'error': 'Действие не выполнено. Проверьте журнал сервиса и повторите запрос.'})
 

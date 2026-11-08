@@ -9,7 +9,7 @@ from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import urlencode, urlsplit
 
-from net import fetch
+from net import fetch, safe_error, SourceError, ERROR_REASONS
 
 
 class PlainText(HTMLParser):
@@ -191,7 +191,12 @@ def openfda(source, query=None):
     args = {"search": term, "limit": cfg.get("limit", 20), "sort": "date_received:desc"}
     if os.environ.get("OPENFDA_API_KEY"):
         args["api_key"] = os.environ["OPENFDA_API_KEY"]
-    data = request_json(source["url"], args)
+    try:
+        data = request_json(source["url"], args)
+    except SourceError as error:
+        if error.safe_code=='empty_result':
+            return
+        raise
     for row in data.get("results", []):
         record = str(row.get("mdr_report_key") or row.get("recall_number") or "")
         if not record:
@@ -319,8 +324,8 @@ def direct_pages(source, query=None):
                 terms = [w.casefold() for w in re.findall(r"[\w-]{3,}", query)]
                 if terms and not any(t in (title + "\n" + text).casefold() for t in terms):
                     continue
-            source.setdefault("checks", []).append({"url": url,
-                "status": "success" if readable else "no_text", "stage": "read",
+            source.setdefault("checks", []).append({"url": url,"planned":True,"complete":True,
+                "status": "success" if readable else "no_text", "stage": "read","code":None if readable else 'no_text',
                 "reason": "Проверен ограниченный каталог публичных страниц" if readable else
                           "Доступный содержательный текст не получен"})
             authors = meta.get("citation_author") or meta.get("author") or []
@@ -331,10 +336,9 @@ def direct_pages(source, query=None):
                 "doi": (meta.get("citation_doi") or [None])[0],
                 "pmid": (meta.get("citation_pmid") or [None])[0],
                 "source_role": page.get("source_role", role)}
-        except Exception:
+        except Exception as error:
             # One page must not prevent the rest of this independent catalogue.
-            source.setdefault("checks", []).append({"url": url, "status": "failed",
-                "stage": "read", "reason": "Не удалось прочитать публичную страницу"})
+            source.setdefault("checks", []).append(dict(safe_error(error,'read'),url=url,status='failed',planned=True,complete=False))
 
 
 def exa_reader(source, query=None):

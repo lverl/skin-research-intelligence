@@ -11,6 +11,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 import db
 from net import fetch
+from net import safe_error, SourceError, ERROR_REASONS
 from collector.adapters import READERS, plain_text
 
 
@@ -157,7 +158,7 @@ def collect(conn, force=False, query=None, *, purpose=None, scope_id=None, owner
     """Collect active sources that are due; query bypasses schedule, not activation."""
     seed_sources(conn)
     run = db.start_run(conn, "collector")
-    from collector.exa import allowed_scientific_url, question_scope, ExaUnavailable
+    from collector.exa import allowed_scientific_url, question_scope, ExaUnavailable, ExaBudgetExceeded
     purpose = purpose or ("question" if query else "monitoring")
     if purpose not in {"question", "monitoring", "daily"}:
         raise ValueError("Unknown collection purpose")
@@ -184,13 +185,52 @@ def collect(conn, force=False, query=None, *, purpose=None, scope_id=None, owner
         source = {"id":source_id,"name":name,"kind":kind,"url":url,"config":config,"checks":[],
                   "context":{"purpose":purpose,"scope_id":scope_id,"run_id":run}}
         obtained, readable_count, channel_ids = 0, 0, []
+        planned, complete, deferred = True, False, None
+        if kind=='direct_pages':
+            deferred=conn.execute('SELECT deferred_at,deferred_code,deferred_reason FROM sources WHERE id=%s',(source_id,)).fetchone()
+            if deferred and deferred[0]:
+                # A deferred channel is outside a later check's plan, never a
+                # successful read. Avoid one persisted record every worker tick.
+                if purpose=='monitoring' and not force:
+                    last_event=last_checked or deferred[0]
+                    if (datetime.now(timezone.utc)-last_event).total_seconds()<interval*3600:
+                        continue
         try:
             reader = READERS.get(kind)
             if reader is None:
-                raise ValueError(f"Unsupported source kind: {kind}")
+                raise SourceError('configuration_error')
             if query and kind == "rss":
                 continue
-            for index,item in enumerate(reader(source,query)):
+            if deferred and deferred[0]:
+                planned=False
+                status='deferred'
+                code='deferred'
+                reason=ERROR_REASONS['deferred']
+                items=iter(())
+            elif kind=='exa':
+                import os
+                from decimal import Decimal,InvalidOperation
+                try:
+                    monthly=Decimal(os.environ.get('EXA_MONTHLY_USD','0'))
+                    if not monthly.is_finite() or monthly<0: raise InvalidOperation
+                except (InvalidOperation,ValueError):
+                    raise SourceError('configuration_error') from None
+                if monthly==0:
+                    planned=False
+                    status,code,reason='disabled','disabled',ERROR_REASONS['disabled']
+                    items=iter(())
+                else:
+                    try:
+                        scope_limit=Decimal(os.environ.get('EXA_SCOPE_USD','0'))
+                        valid_scope=scope_limit.is_finite() and scope_limit>0
+                    except (InvalidOperation,ValueError):
+                        valid_scope=False
+                    if not valid_scope:
+                        raise SourceError('configuration_error')
+                    items=reader(source,query)
+            else:
+                items=reader(source,query)
+            for index,item in enumerate(items):
                 if index >= int(config.get("limit",20)):
                     break
                 if purpose == "question" and not allowed_scientific_url(item.get("url")):
@@ -204,9 +244,9 @@ def collect(conn, force=False, query=None, *, purpose=None, scope_id=None, owner
                 count += 1
             page_failures = any(c.get("status") == "failed" for c in source["checks"])
             page_no_text = any(c.get("status") == "no_text" for c in source["checks"])
-            if page_failures:
-                errors.append(name)
-            if page_failures:
+            if not planned:
+                pass
+            elif page_failures:
                 status = "partial" if obtained else "failed"
             elif obtained and not readable_count:
                 status = "no_text"
@@ -214,27 +254,48 @@ def collect(conn, force=False, query=None, *, purpose=None, scope_id=None, owner
                 status = "partial"
             else:
                 status = "success" if obtained else "empty"
+            if planned:
+                complete=not page_failures
+                first_error=next((c for c in source['checks'] if c.get('status')=='failed'),None)
+                code=first_error.get('code','source_unavailable') if first_error else 'no_text' if status=='no_text' else 'empty_result' if status=='empty' else None
+                reason=first_error.get('reason',ERROR_REASONS['source_unavailable']) if first_error else ERROR_REASONS['no_text'] if status in {'no_text','partial'} else config.get('coverage')
+                if kind=='direct_pages' and not source['checks']:
+                    planned,complete,status,code,reason=False,False,'out_of_scope','out_of_scope',ERROR_REASONS['out_of_scope']
+                # Only these two agreed public channels are deferred on failed
+                # access. Do not change active/config or appoint a replacement.
+                host=(urlsplit(url).hostname or '').lower()
+                if kind=='direct_pages' and host in {'aad.org','www.aad.org','cochrane.org','www.cochrane.org'} and not readable_count and (page_failures or status=='no_text'):
+                    complete=False
+                    if not readable_count: status='failed'
+                    conn.execute('UPDATE sources SET deferred_at=now(),deferred_code=%s,deferred_reason=%s WHERE id=%s',
+                                 (code or 'source_unavailable',reason or ERROR_REASONS['source_unavailable'],source_id))
+            if planned and not complete:
+                errors.append(name)
             check = {"source_id":source_id,"name":name,"status":status,"stage":"collection",
-                     "material_ids":channel_ids,"pages":source["checks"],
-                     "reason": "Доступный текст отсутствует у части материалов" if status in {"no_text","partial"}
-                               else config.get("coverage")}
+                     "material_ids":channel_ids,"pages":source["checks"],"reason":reason,
+                     "code":code,"planned":planned,"complete":complete}
+            check['stage']=first_error.get('stage','collection') if planned and first_error else 'collection'
+            if planned and first_error and 'http_status' in first_error:
+                check['http_status']=first_error['http_status']
             if purpose != "question":
                 conn.execute("UPDATE sources SET last_checked_at=now(),last_error=%s WHERE id=%s",
-                             ("Часть страниц недоступна" if page_failures else None, source_id))
+                             (reason if not complete else None, source_id))
         except Exception as error:
             # A single failing source must not prevent all remaining sources.
-            message = str(error) if isinstance(error,ExaUnavailable) else f"{type(error).__name__}: collection failed"
+            info=safe_error(error,'collection')
+            message=info['reason']
             if purpose != "question":
                 conn.execute("UPDATE sources SET last_error=%s,last_checked_at=now() WHERE id=%s",(message,source_id))
             errors.append(name)
             db.log("collector",f"{name}: {message}")
-            check = {"source_id":source_id,"name":name,"status":"partial" if obtained else "failed",
-                     "stage":"collection","reason":message,"material_ids":channel_ids,"pages":source["checks"]}
+            check = dict(info,source_id=source_id,name=name,status='partial' if obtained else 'blocked' if info['code']=='budget_exceeded' else 'failed',
+                         planned=True,complete=False,material_ids=channel_ids,pages=source['checks'])
         checks.append(check)
-        conn.execute("""INSERT INTO source_checks(run_id,source_id,purpose,scope_id,status,stage,reason,details)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb)""",
+        conn.execute("""INSERT INTO source_checks(run_id,source_id,purpose,scope_id,status,stage,reason,details,planned,complete,code)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)""",
             (run,source_id,purpose,scope_id,check["status"],check["stage"],check.get("reason"),
-             json.dumps({"material_ids":channel_ids,"pages":source["checks"]},ensure_ascii=False)))
+             json.dumps({"material_ids":channel_ids,"pages":source["checks"],"http_status":check.get('http_status')},ensure_ascii=False),
+             check['planned'],check['complete'],check.get('code')))
     note = f"Processed {count} records; failed sources: {', '.join(errors) or 'none'}"
     db.finish_run(conn,"collector",run,count,note)
     return {"processed":count,"failed_sources":errors,"material_ids":list(dict.fromkeys(material_ids)),

@@ -6,6 +6,7 @@ import db
 import llm
 from evidence import validate_facts
 from db import jsonb as Jsonb
+from net import safe_error
 
 KINDS={'research','review','guideline','regulatory','news','commercial','expert','experience','product'}
 
@@ -32,7 +33,7 @@ def _synthesize_topics(conn, topics):
         try:
             synthesize(conn,topic)
         except Exception as error:
-            errors.append({'stage':'synthesis','reason':llm.safe_error(error)})
+            errors.append(safe_error(error,'synthesis'))
     return errors
 
 def process_material(conn,row,force=False):
@@ -42,7 +43,11 @@ def process_material(conn,row,force=False):
         return {'status':'locked','facts_saved':0,'synthesis_errors':[]}
     try:
         current=conn.execute('SELECT id,title,text,text_scope,source_role FROM materials WHERE id=%s',(mid,)).fetchone()
-        return _process_material(conn,current or row,force)
+        report=_process_material(conn,current or row,force)
+        if report.get('synthesis_errors'):
+            conn.execute("UPDATE materials SET last_error=%s WHERE id=%s AND status IN ('done','skipped')",
+                         (json.dumps(report['synthesis_errors'],ensure_ascii=False),mid))
+        return report
     finally:
         conn.execute('SELECT pg_advisory_unlock(%s,%s)',(42,mid))
 
@@ -136,7 +141,7 @@ def process_new(conn):
             conn.execute('UPDATE materials SET attempts=attempts-1 WHERE id=%s',(row[0],))
             raise
         except Exception as error:
-            reason=llm.safe_error(error)
+            reason=json.dumps(safe_error(error,'processing'),ensure_ascii=False)
             conn.execute("""UPDATE materials SET status='failed',last_error=%s WHERE id=%s
                 AND status<>'done' AND text IS NOT DISTINCT FROM %s AND text_scope=%s""",
                 (reason,row[0],row[2],row[3]))

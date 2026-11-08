@@ -113,23 +113,37 @@ def format_digest(day, content):
 
 
 def format_answer(content):
+    state=research.answer_state(content)
+    parts=[research.ANSWER_MESSAGES[state]]
     if content.get('clarification'):
-        return str(content['clarification'])
-    parts = [str(claim['text']) for claim in content.get('claims', [])]
-    if not parts:
-        parts.append('Проверенных данных для содержательного ответа пока недостаточно.')
+        parts.append(str(content['clarification']))
+    if state in {'completed','partial'}:
+        parts.extend(str(claim['text']) for claim in content.get('claims', []))
     for key, title in (('limitations', 'Ограничения'), ('contradictions', 'Противоречия'), ('missing_data', 'Чего не хватает')):
         if content.get(key):
-            parts.append(title + ':\n' + '\n'.join('• ' + str(value) for value in content[key]))
+            lines=[re.sub(r'\b[A-Za-z][A-Za-z0-9_]*(?:Error|Exception)\b','ошибка проверки',str(value)) for value in content[key]]
+            parts.append(title + ':\n' + '\n'.join('• ' + value for value in lines))
     sources, seen = [], set()
-    for source in content.get('sources', []):
+    for source in content.get('sources', []) if state in {'completed','partial'} else []:
         url = source.get('url')
         if url and url not in seen:
             seen.add(url)
-            suffix = ' · изучена аннотация' if source.get('scope') == 'abstract' else ''
-            sources.append(str(source.get('title', 'Источник')) + ' · '+str(source.get('kind','тип не указан'))+ suffix + '\n' + str(url))
+            roles={'reference':'Дерматологическая справка','professional_information':'Профессиональное объяснение для пациентов',
+                   'systematic_review':'Обзор исследований','systematic_review_summary':'Публичное резюме обзора'}
+            kinds={'research':'Исследование','review':'Обзор','guideline':'Рекомендация','regulatory':'Регуляторный материал',
+                   'news':'Новость','commercial':'Коммерческий материал','expert':'Экспертный материал','experience':'Личный опыт','product':'Данные о продукте'}
+            scopes={'abstract':'изучена аннотация','excerpt':'доступный фрагмент','metadata':'только метаданные','full_text':'полный текст'}
+            label=roles.get(source.get('source_role')) or kinds.get(source.get('kind'),'Источник')
+            suffix=' · '+scopes[source['scope']] if source.get('scope') in scopes else ''
+            sources.append(str(source.get('title', 'Источник')) + ' · '+label+ suffix + '\n' + str(url))
     if sources:
         parts.append('Источники:\n' + '\n\n'.join(sources))
+    labels={'success':'проверен','empty':'подходящих результатов нет','no_text':'нет доступного текста',
+            'partial':'проверен частично','failed':'проверка не завершена','blocked':'лимит исчерпан',
+            'disabled':'планово выключен','deferred':'подключение отложено','out_of_scope':'в каталоге нет страниц для этой темы'}
+    if content.get('source_checks'):
+        parts.append('Проверка источников:\n'+'\n'.join(str(check.get('name') or 'Источник')+': '+labels.get(check.get('status'),'проверка не завершена')+
+            (' · не входил в эту проверку' if check.get('planned') is False else '') for check in content['source_checks'][:20]))
     parts.append('Справочная информация; индивидуальные назначения не составляются.')
     return '\n\n'.join(parts)
 

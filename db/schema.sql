@@ -4,6 +4,9 @@ ALTER TABLE sources ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS interval_hours INTEGER NOT NULL DEFAULT 24;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_checked_at TIMESTAMPTZ;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS deferred_at TIMESTAMPTZ;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS deferred_code TEXT;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS deferred_reason TEXT;
 CREATE TABLE IF NOT EXISTS runs(id SERIAL PRIMARY KEY,service TEXT NOT NULL,status TEXT NOT NULL,started_at TIMESTAMPTZ NOT NULL DEFAULT now(),finished_at TIMESTAMPTZ,items INTEGER NOT NULL DEFAULT 0,note TEXT);
 CREATE TABLE IF NOT EXISTS materials(id SERIAL PRIMARY KEY,source_id INTEGER REFERENCES sources(id),run_id INTEGER REFERENCES runs(id),url TEXT UNIQUE NOT NULL,title TEXT NOT NULL,text TEXT,published_at TIMESTAMPTZ,collected_at TIMESTAMPTZ NOT NULL DEFAULT now(),status TEXT NOT NULL DEFAULT 'new');
 ALTER TABLE materials ADD COLUMN IF NOT EXISTS doi TEXT;
@@ -56,6 +59,9 @@ CREATE TABLE IF NOT EXISTS source_checks(
  purpose TEXT NOT NULL,scope_id TEXT,status TEXT NOT NULL,stage TEXT NOT NULL,reason TEXT,
  details JSONB NOT NULL DEFAULT '{}',started_at TIMESTAMPTZ NOT NULL DEFAULT now(),finished_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS source_checks_created ON source_checks(finished_at);
+ALTER TABLE source_checks ADD COLUMN IF NOT EXISTS planned BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE source_checks ADD COLUMN IF NOT EXISTS complete BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE source_checks ADD COLUMN IF NOT EXISTS code TEXT;
 -- Preserve original AI data, but never collect it for the new product.
 UPDATE sources SET active=FALSE WHERE kind IN ('hn','arxiv') OR name IN ('Хабр: ИИ','Sostav','New Retail');
 -- Explicit approved replacement, including databases with old active defaults.

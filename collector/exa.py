@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 import db
-from net import validate_url
+from net import validate_url, safe_error, ERROR_REASONS
 
 API_URL = "https://api.exa.ai"
 PRICING_DATE = "2026-11-08"
@@ -31,10 +31,21 @@ EXCLUDED_DOMAINS = ["europepmc.org", "ncbi.nlm.nih.gov", "ebi.ac.uk/europepmc"]
 
 class ExaUnavailable(RuntimeError):
     """Safe, controlled channel failure; never carries provider error bodies."""
+    safe_code='source_unavailable'
+
+    def __init__(self, message='', *, code=None, http_status=None):
+        configuration_messages={'Ключ Exa не настроен','Некорректная настройка расходов Exa',
+            'Не задан устойчивый контекст бюджета Exa','Некорректный этап поиска Exa',
+            'Верхняя стоимость Exa не подтверждена актуальным тарифом',
+            'Некорректные ограничения страниц Exa','Не задана достаточная верхняя стоимость вызовов Exa',
+            'Не задана тема поиска Exa'}
+        self.safe_code=code if code in ERROR_REASONS else 'configuration_error' if message in configuration_messages else self.safe_code
+        self.http_status=http_status if type(http_status) is int and 100<=http_status<=599 else None
+        super().__init__(ERROR_REASONS[self.safe_code]+(' ('+str(self.http_status)+')' if self.http_status else ''))
 
 
 class ExaBudgetExceeded(ExaUnavailable):
-    pass
+    safe_code='budget_exceeded'
 
 
 def _decimal(value):
@@ -154,7 +165,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
             fp.close()
         except Exception:
             pass
-        raise ExaUnavailable("Перенаправление API Exa запрещено")
+        raise ExaUnavailable(code='redirect_blocked')
 
 
 def post_json(path, payload):
@@ -186,11 +197,12 @@ def post_json(path, payload):
         except Exception:
             # Cleanup failures must not expose an untrusted response or its body.
             pass
-        raise ExaUnavailable("Ошибка HTTP Exa: " + str(code)) from None
+        raise ExaUnavailable(code='http_error',http_status=code) from None
     except ExaUnavailable:
         raise
-    except Exception:
-        raise ExaUnavailable("Не удалось получить ответ Exa") from None
+    except Exception as error:
+        info=safe_error(error,'access')
+        raise ExaUnavailable(code=info['code'],http_status=info.get('http_status')) from None
 
 
 def _settings():
@@ -224,10 +236,11 @@ def _paid_call(context, operation, payload, upper):
         if actual is not None and actual > upper:
             raise ExaUnavailable("Подтверждённая стоимость Exa превысила резерв")
         return response
-    except Exception:
+    except Exception as error:
         # A possibly billed call is never refunded because its response was lost.
         finish_call(call_id, status="unknown")
-        raise ExaUnavailable("Поиск или получение текста Exa не завершены") from None
+        info=safe_error(error,operation)
+        raise ExaUnavailable(code=info['code'],http_status=info.get('http_status')) from None
 
 
 def read_exa(source, query=None):
@@ -263,8 +276,7 @@ def read_exa(source, query=None):
                 if isinstance(row, dict) and row.get("url") in urls and allowed_scientific_url(row["url"]):
                     details[row["url"]] = row
         except ExaUnavailable as error:
-            source.setdefault("checks", []).append({"status": "failed", "stage": "contents",
-                "reason": str(error)})
+            source.setdefault("checks", []).append(dict(safe_error(error,'contents'),status='failed',planned=True,complete=False))
     for candidate in candidates:
         row = dict(candidate)
         row.update(details.get(row["url"], {}))
