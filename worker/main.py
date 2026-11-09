@@ -4,6 +4,7 @@ import os
 import time
 import db
 import llm
+import relevance
 from evidence import validate_facts
 from db import jsonb as Jsonb
 from net import safe_error
@@ -36,14 +37,29 @@ def _synthesize_topics(conn, topics):
             errors.append(safe_error(error,'synthesis'))
     return errors
 
-def process_material(conn,row,force=False):
+def process_material(conn,row,force=False,*,purpose='reader',owner_telegram_id=None,question=None):
     mid=row[0]
     locked=conn.execute('SELECT pg_try_advisory_lock(%s,%s)',(42,mid)).fetchone()[0]
     if not locked:
         return {'status':'locked','facts_saved':0,'synthesis_errors':[]}
     try:
         current=conn.execute('SELECT id,title,text,text_scope,source_role FROM materials WHERE id=%s',(mid,)).fetchone()
-        report=_process_material(conn,current or row,force)
+        snapshot=current or row
+        if len(snapshot)<5:
+            snapshot=tuple(snapshot)+('unknown',)
+        material=relevance.material_from_row(snapshot)
+        if material['text_scope']=='metadata' or not isinstance(material.get('text'),str) or not material['text'].strip():
+            return _process_material(conn,snapshot,force)
+        admission=relevance.ensure_assessment(conn,material,purpose=purpose,
+            owner_telegram_id=owner_telegram_id,question=question)
+        if admission['status']!='eligible':
+            if purpose=='reader' and admission['status']=='excluded':
+                conn.execute("""UPDATE materials SET status='skipped',last_error=NULL WHERE id=%s
+                    AND status IN ('new','failed') AND reader_text_version(title,text,text_scope,source_role)=%s""",
+                    (mid,admission['text_version']))
+            return {'status':admission['status'],'facts_saved':0,'synthesis_errors':[],
+                    'assessment':admission,'errors':admission.get('errors',[])}
+        report=_process_material(conn,snapshot,force,question=question if purpose=='question' else None)
         if report.get('synthesis_errors'):
             conn.execute("UPDATE materials SET last_error=%s WHERE id=%s AND status IN ('done','skipped')",
                          (json.dumps(report['synthesis_errors'],ensure_ascii=False),mid))
@@ -51,7 +67,7 @@ def process_material(conn,row,force=False):
     finally:
         conn.execute('SELECT pg_advisory_unlock(%s,%s)',(42,mid))
 
-def _process_material(conn,row,force=False):
+def _process_material(conn,row,force=False,*,question=None):
     mid,title,text,scope=row[:4]
     source_role=row[4] if len(row)>4 else 'unknown'
     prior=conn.execute('SELECT topics FROM findings WHERE material_id=%s',(mid,)).fetchone()
@@ -65,7 +81,8 @@ def _process_material(conn,row,force=False):
             conn.execute('UPDATE facts SET active=FALSE WHERE material_id=%s',(mid,))
             conn.execute('UPDATE findings SET verified=FALSE WHERE material_id=%s',(mid,))
         return {'status':'no_text','facts_saved':0,'synthesis_errors':[]}
-    triage=llm.call(conn,'triage','Оцени релевантность косметологии и уходу. Верни {relevant:bool, important:bool, kind:str, summary:str, topics:[str]}. kind: research/review/guideline/regulatory/news/commercial/expert/experience/product. summary — краткий пересказ по-русски; topics — до 5 устойчивых русских названий тем. '+SOURCE_RULES,{'title':title,'text':text[:12000],'scope':scope,'source_role':source_role})
+    task=('Оцени релевантность конкретному вопросу: '+question+'. ' if question else 'Оцени релевантность косметологии и уходу. ')
+    triage=llm.call(conn,'triage',task+'Верни {relevant:bool, important:bool, kind:str, summary:str, topics:[str]}. kind: research/review/guideline/regulatory/news/commercial/expert/experience/product. summary — краткий пересказ по-русски; topics — до 5 устойчивых русских названий тем. '+SOURCE_RULES,{'title':title,'text':text[:12000],'scope':scope,'source_role':source_role})
     if type(triage.get('relevant')) is not bool:
         raise ValueError('Некорректный отбор')
     if not triage['relevant']:
@@ -100,8 +117,10 @@ def _process_material(conn,row,force=False):
     # unique facts, matching the database's material/statement/quote identity.
     details['facts']=list({(fact['statement'],fact['quote']):fact for fact in details['facts']}.values())
     with conn.transaction():
-        current=conn.execute('SELECT text FROM materials WHERE id=%s FOR UPDATE',(mid,)).fetchone()
-        if not current or current[0]!=text:
+        current=conn.execute('SELECT title,text,text_scope,source_role FROM materials WHERE id=%s FOR UPDATE',(mid,)).fetchone()
+        original={'title':title,'text':text,'text_scope':scope,'source_role':source_role}
+        actual=dict(zip(('title','text','text_scope','source_role'),current)) if current else None
+        if not actual or relevance.text_version(actual)!=relevance.text_version(original):
             raise ValueError('Текст изменился во время обработки')
         old=conn.execute('SELECT details FROM findings WHERE material_id=%s',(mid,)).fetchone()
         if old:
@@ -121,7 +140,7 @@ def process_new(conn):
         return
     # Earlier versions exhausted retries even when MODEL or its key was missing.
     conn.execute("UPDATE materials SET attempts=0,status='new',last_error=NULL WHERE status='failed' AND last_error='RuntimeError'")
-    pending=conn.execute("SELECT id,title,text,text_scope FROM materials WHERE status IN ('new','failed') AND attempts<3 ORDER BY id LIMIT 30").fetchall()
+    pending=relevance.pending_materials(conn)
     if not pending:
         counts=conn.execute("SELECT count(*) FILTER(WHERE status='done'),count(*) FILTER(WHERE status='failed') FROM materials").fetchone()
         db.log('worker',f'Очередь без новых задач: обработано {counts[0]}, ошибок {counts[1]}')

@@ -11,6 +11,7 @@ from uuid import uuid4
 import net
 from collector import adapters
 from collector import main as collector
+from test_reader_relevance import complete_review
 
 
 PAGES = (
@@ -34,6 +35,7 @@ def html_fixture(index):
             f'<meta name="citation_author" content="Fixture {name} Author">'
             '<meta name="citation_publication_date" content="2004-02-03">'
             '</head><body><main><h1>Retinol fixture</h1>'
+            '<p>Synthetic fixture: adult participants received topical retinol for facial skincare with human study results.</p>'
             f'<p>Synthetic {role} text. Twelve fixture observations were recorded.</p>'
             '<p>This synthetic page is not clinical advice or a real study.</p>'
             '</main><script>HIDDEN_SCRIPT_SECRET</script></body></html>').encode()
@@ -265,6 +267,8 @@ class DirectSourcePostgresTests(unittest.TestCase):
         fixtures = {PAGES[index][1]: html_fixture(index) for index in range(3)}
 
         def model(conn, stage, instructions, data):
+            if stage == "reader_review":
+                return complete_review({"text": data["text"]})
             if stage == "triage":
                 return {"relevant": True, "important": True, "kind": "expert", "summary": "Фикстура", "topics": []}
             if stage == "extract":

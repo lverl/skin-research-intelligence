@@ -18,6 +18,7 @@ from collector import main as collector
 from web.main import Handler
 from worker.main import process_material
 from test_direct_sources import PAGES, html_fixture, source_fixture
+from test_reader_relevance import complete_review
 
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "Dedicated TEST_DATABASE_URL is required")
@@ -49,6 +50,8 @@ class SourceAcceptancePostgresTests(unittest.TestCase):
         quote = "Twelve fixture observations were recorded."
 
         def model(conn, stage, instructions, data):
+            if stage == "reader_review":
+                return complete_review({"text": data["text"]})
             if stage == "triage":
                 return {"relevant": True, "important": True, "kind": "research", "summary": "Контрольный материал об уходе",
                         "topics": ["retinol acne"]}

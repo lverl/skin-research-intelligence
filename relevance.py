@@ -28,6 +28,9 @@ REASONS = {
     'wrong_audience': 'Применимость к взрослым читательницам не установлена',
     'unsupported_topic': 'Выбранное направление не подтверждено содержанием',
     'human_results_required': 'Для этого научного материала нет подтверждённых результатов на людях',
+    'review_failed': 'Оценка применимости не завершена: ошибка сервиса модели',
+    'review_locked': 'Оценка применимости уже выполняется',
+    'text_changed': 'Материал изменился во время оценки применимости',
 }
 
 
@@ -139,8 +142,17 @@ def assess(material, *, profile=None, purpose='reader', owner_telegram_id=None,
             return result('excluded', 'commercial')
     if not isinstance(review, dict):
         return result('needs_review', 'review_required')
+    decision = review.get('decision')
+    if decision is not None and (decision not in {'eligible', 'excluded', 'needs_review'}
+            or decision == 'needs_review' or (decision == 'excluded' and review.get('relevant') is not False)):
+        return result('needs_review', 'incomplete_review')
     if review.get('relevant') is False:
-        return result('excluded', 'off_topic')
+        negative_quote = normalized(review.get('evidence_quote'))
+        if (review.get('decision') == 'excluded' and isinstance(review.get('reason'), str)
+                and review['reason'].strip() and len(negative_quote) >= 12
+                and negative_quote in normalized(text)):
+            return result('excluded', 'off_topic', evidence_quote=negative_quote)
+        return result('needs_review', 'incomplete_review')
     required = ('topic', 'subject', 'application', 'audience', 'reason', 'evidence_quote')
     if review.get('relevant') is not True or any(not isinstance(review.get(k), str) or not review[k].strip() for k in required):
         return result('needs_review', 'incomplete_review')
@@ -220,3 +232,95 @@ def record_candidate(conn, material_id):
     existing = get_current_assessment(conn, material)
     if existing is None:
         store_assessment(conn, material, assess(material))
+
+
+REVIEW_PROMPT = '''Оцени применимость ТОЛЬКО по переданному тексту. Для purpose=reader
+нужна полезность женщинам около 40 лет по четырём направлениям профиля: кожа лица/шеи,
+эстетические процедуры лица/шеи, домашние устройства/массаж, независимые данные о готовой
+косметике. Не путай вагинальные, стоматологические или глазные процедуры с уходом за лицом.
+Человеческие клетки не являются участниками исследования. Чисто лабораторные/животные
+работы, исключительно детские данные и протоколы без результатов не дают reader-допуска.
+Смешанную работу оценивай по реальным результатам взрослой человеческой части. Справка
+reference/professional_information может быть полезной без клинического испытания и возраста.
+Для purpose=question оценивай соответствие конкретному вопросу; это личный допуск,
+который не разрешает публикацию в общей подборке. Не переносить эффекты между задачами.
+Верни {decision:eligible|excluded|needs_review,relevant:bool|null,topic:str,subject:str,application:str,audience:str,human_results:bool,
+evidence_quote:str,reason:str}. Для reader topic — ключ из profile.topics,
+application: face_neck или facial_skincare; audience: adults или general_adults.
+evidence_quote — дословная цитата, подтверждающая именно задачу/применение/аудиторию.
+human_results=true только для реально представленных результатов на людях, не для клеток.
+Если применения/данных установить нельзя, decision=needs_review и relevant=null;
+неопределённость не означает исключение. decision=excluded и relevant=false только
+при явном несоответствии, с reason и подтверждающей дословной evidence_quote.
+Не заполняй пробелы выдумкой.'''
+
+
+def ensure_assessment(conn, material, *, purpose='reader', owner_telegram_id=None,
+                      question=None, allow_model=True):
+    """At most one classification per unchanged scope/text/profile, with no deep analysis."""
+    import llm
+    from net import safe_error
+    profile = load_profile()
+    options = dict(profile=profile, purpose=purpose,
+                   owner_telegram_id=owner_telegram_id, question=question)
+    initial = assess(material, **options)
+    if initial['status'] == 'excluded' or initial['code'] == 'no_text':
+        store_assessment(conn, material, initial)
+        return initial
+    cached = get_current_assessment(conn, material, **options)
+    if cached and (cached['status'] != 'needs_review' or cached.get('review_attempted')):
+        return cached
+    if not allow_model:
+        if cached is None:
+            store_assessment(conn, material, initial)
+        return cached or initial
+    key = str(material['id']) + ':' + initial['scope_key']
+    locked = conn.execute('SELECT pg_try_advisory_lock(4217,hashtext(%s))', (key,)).fetchone()[0]
+    if not locked:
+        return dict(initial, code='review_locked', reason=REASONS['review_locked'])
+    try:
+        cached = get_current_assessment(conn, material, **options)
+        if cached and (cached['status'] != 'needs_review' or cached.get('review_attempted')):
+            return cached
+        try:
+            review = llm.call(conn, 'reader_review', REVIEW_PROMPT, {
+                'profile': profile, 'purpose': purpose, 'question': question,
+                'material': {key: material.get(key) for key in ('title', 'source_role', 'text_scope')},
+                'text': material.get('text', '')[:18000],
+            })
+            result = assess(material, review=review, **options)
+        except llm.BudgetExceeded:
+            raise
+        except Exception as error:
+            result = dict(initial, code='review_failed', reason=REASONS['review_failed'],
+                          review_attempted=True, errors=[safe_error(error, 'processing')])
+        if not store_assessment(conn, material, result):
+            return dict(initial, code='text_changed', reason=REASONS['text_changed'])
+        return result
+    finally:
+        conn.execute('SELECT pg_advisory_unlock(4217,hashtext(%s))', (key,))
+
+
+def pending_materials(conn):
+    """New imports plus a bounded, topical slice of legacy records; never the whole archive."""
+    profile = load_profile()
+    current = '''a.material_id=m.id AND a.profile_version=%s AND a.scope_key='reader'
+        AND a.text_version=reader_text_version(m.title,m.text,m.text_scope,m.source_role)'''
+    fresh = conn.execute('''SELECT m.id,m.title,m.text,m.text_scope FROM materials m
+        WHERE m.status IN ('new','failed') AND m.attempts<3 AND EXISTS
+        (SELECT 1 FROM material_assessments a WHERE ''' + current + ''' AND
+         (a.status<>'needs_review' OR NOT coalesce((a.details->>'review_attempted')::boolean,FALSE)))
+        ORDER BY m.id LIMIT 30''', (profile['version'],)).fetchall()
+    hints = ['%'+word+'%' for word in ('retinol', 'retinoid', 'facial', 'face and neck',
+              'skincare', 'skin care', 'sunscreen', 'moistur', 'radiofrequency', 'LED mask',
+              'ретинол', 'ретиноид', 'кожи лица', 'уход за кожей', 'пигментац', 'массаж лица')]
+    legacy_limit = min(int(profile['legacy_per_cycle']), max(0, 30-len(fresh)))
+    if not legacy_limit:
+        return fresh
+    legacy = conn.execute('''SELECT m.id,m.title,m.text,m.text_scope FROM materials m
+        WHERE m.status IN ('new','failed') AND m.attempts<3
+        AND NOT EXISTS(SELECT 1 FROM material_assessments a WHERE ''' + current + ''')
+        AND (m.title ILIKE ANY(%s) OR left(coalesce(m.text,''),6000) ILIKE ANY(%s))
+        ORDER BY m.id LIMIT %s''',
+        (profile['version'], hints, hints, legacy_limit)).fetchall()
+    return fresh + legacy

@@ -12,9 +12,11 @@ import research
 from collector import main as collector
 from collector import exa
 from worker import main as worker
+from test_reader_relevance import complete_review
 
 
 QUOTE = "Twelve fixture observations were recorded."
+READABLE_TEXT = "Synthetic human study of topical retinol for adult facial skincare with human results. " + QUOTE
 
 
 class Result:
@@ -78,6 +80,8 @@ def fact_fixture(material_id=11, fact_id=101):
 
 
 def model_fixture(conn, stage, instructions, data):
+    if stage == "reader_review":
+        return complete_review({"text": data["text"]})
     if stage == "search_plan":
         return {"query": "retinol fixture", "terms": ["retinol"], "clarification": "", "subject_identified": True}
     if stage == "triage":
@@ -250,9 +254,9 @@ class ProcessingPostgresTests(unittest.TestCase):
         self.admin.execute(f'DROP SCHEMA "{self.schema}" CASCADE')
         self.admin.close()
 
-    def material(self, *, suffix=None, role="research_candidate", text=QUOTE, scope="excerpt"):
+    def material(self, *, suffix=None, role="research_candidate", text=READABLE_TEXT, scope="excerpt"):
         return collector.ingest(self.conn, {"url": "https://example.org/retinol/" + (suffix or uuid4().hex),
-                                "title": "Retinol fixture", "text": text, "text_scope": scope, "source_role": role})
+                                "title": "Adult facial retinol fixture", "text": text, "text_scope": scope, "source_role": role})
 
     def row(self, mid):
         return self.conn.execute("SELECT id,title,text,text_scope FROM materials WHERE id=%s", (mid,)).fetchone()

@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime,timezone
 from unittest.mock import patch
 from uuid import uuid4
+from test_reader_relevance import complete_review
 
 @unittest.skipUnless(os.environ.get('TEST_DATABASE_URL'), 'Set TEST_DATABASE_URL for a dedicated test database')
 class PostgresTests(unittest.TestCase):
@@ -20,8 +21,8 @@ class PostgresTests(unittest.TestCase):
         self.conn.close()
 
     def item(self,**changes):
-        return dict({'url':'https://example.org/'+self.suffix,'title':'RF skin test '+self.suffix,
-                     'text':'Twelve participants completed follow-up. No adverse events were reported.',
+        return dict({'url':'https://example.org/'+self.suffix,'title':'Adult facial RF skin test '+self.suffix,
+                     'text':'Synthetic clinical study of facial radiofrequency in adults. Twelve participants completed follow-up. No adverse events were reported.',
                      'text_scope':'abstract'},**changes)
 
     def test_seed_preserves_admin_settings(self):
@@ -64,6 +65,7 @@ class PostgresTests(unittest.TestCase):
         topic='RF '+self.suffix
 
         def model(conn,stage,instructions,data):
+            if stage=='reader_review': return complete_review({'text':data['text']},'aesthetic_procedures')
             if stage=='triage': return {'relevant':True,'important':True,'kind':'research','summary':'Тестовый пересказ','topics':[topic]}
             if stage=='extract': return {'facts':[{'statement':topic+': twelve participants','quote':'Twelve participants completed follow-up.','payload':{'sample_size':12}}],'limitations':['Только аннотация']}
             if stage=='verify': return {'accepted_indices':[0],'limitations':[]}
@@ -97,6 +99,7 @@ class PostgresTests(unittest.TestCase):
         self.conn.execute('INSERT INTO facts(material_id,statement,quote) VALUES (%s,%s,%s)',(mid,topic,'Twelve participants completed follow-up.'))
         self.conn.execute("INSERT INTO conclusions(topic,version,content,reason) VALUES (%s,1,'{}','fixture')",(topic,))
         def model(conn,stage,instructions,data):
+            if stage=='reader_review': return complete_review({'text':data['text']},'aesthetic_procedures')
             if stage=='triage': return {'relevant':True,'important':True,'kind':'research','summary':'Пересмотр','topics':[topic]}
             if stage=='extract': return {'facts':[],'limitations':['Нет достаточных результатов']}
             if stage=='verify': return {'accepted_indices':[],'limitations':[]}
