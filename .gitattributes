@@ -1,0 +1,2 @@
+# Keep the exact owner-approved bytes, including the original single CRLF.
+docs/specs/005-reader-relevance/approved-spec.md -text whitespace=cr-at-eol

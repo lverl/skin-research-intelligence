@@ -287,4 +287,3 @@ class ReaderAnswersPostgresTests(unittest.TestCase):
         self.assertEqual(unknown["status"], "insufficient_data")
         self.assertEqual(unknown["errors"], [])
         self.assertEqual(unknown["claims"], [])
-

@@ -192,4 +192,3 @@ class AnswerGroundingTests(unittest.TestCase):
         explicit = relevance.assess(lab, purpose="question", owner_telegram_id=41,
                                     question="Как изучали ретинол in vitro в клетках?", review=complete_review(lab))
         self.assertEqual(explicit["status"], "eligible")
-

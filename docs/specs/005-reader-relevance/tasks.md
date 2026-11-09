@@ -10,6 +10,8 @@
 | 4 FIX-008 | Тематический непустой ответ, независимые подтверждения, безопасные ошибки | root | reader_tests_b | answer_path_audit | Проверено C: 280 passed / 0 skipped, 116 PG; Critical/Important 0 |
 | 5 DIG-002 | Проверенная находка с фактами; 0 постороннего, отдельные непригодные отбрасываются | root | reader_tests_b | answer_path_audit | Проверено C: 311 passed / 0 skipped, 138 PG; Critical/Important 0 |
 | 6 UI-001 | Серверный допуск, права, вкладки/история, 10/5, настоящий браузер375px | root | reader_tests_b | answer_path_audit | Проверено C: 324 passed / 0 skipped, 146 PG; Chrome375, Critical/Important 0 |
-| 7 QA-004 | Сквозная PostgreSQL, документы и обозначенные границы живой приёмки | root | reader_tests_b | answer_path_audit | Следующая задача |
+| 7 QA-004 | Сквозная PostgreSQL, документы и обозначенные границы живой приёмки | root | reader_tests_b | answer_path_audit | Проверено C: 329 passed / 0 skipped, 149 PG; Chrome375, docs и SHA, Critical/Important 0 |
 
 Один ID — один коммит. До каждого C запускает весь набор; фиксируются counts/skips и read-only ревью. Непроверенное не Done. Подробные тесты — утверждённая SPEC §3–4; живую приёмку подменённым API не заменять.
+
+Все семь задач локальной реализации завершены. Внешние источники/живая модель/доставка на сервере этим не приняты; публикация, merge, деплой и массовые платные повторы отдельно. Точка входа — последняя веха progress.md в Cosm2-sources-approved.
