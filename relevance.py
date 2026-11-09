@@ -73,7 +73,7 @@ def text_version(material):
 
 DOMAIN_RULES = (
     r'vagin|vulvovagin|gynaecolog|gynecolog|влагалищ|гинеколог',
-    r'\bretin(?:a|al)\b|ophthalm|corneal|сетчатк|офтальмолог',
+    r'\bretina\b|\bretinal (?:cell|transplant|degenerat|pigment epitheli|disease|replacement)|ophthalm|corneal|сетчатк|офтальмолог',
     r'periodont|periodontal|dental|gingivit|пародонт|стоматолог|зубн',
     r'parenteral nutrition|парентеральн|neonatal pig|новорожд[её]нн.{0,20}поросят',
     r'chronic wounds?|pressure ulcers?|хроническ.{0,12}ран|пролежн',
@@ -82,8 +82,8 @@ LAB_RULE = r'in[ -]vitro|cell cultures?|cellular cultures?|fibroblast.{0,15}cult
 CHILD_RULE = r'paediatric|pediatric|children|infants|newborn|неонатальн|младенц|детей|детск'
 FACE_RULE = r'facial|face(?: and neck)?|skin[ -]?care|dermatolog|кож.{0,10}лиц|уход.{0,15}кож|омоложени.{0,10}лиц'
 TOPIC_SIGNALS = {
-    'home_skincare': r'topical|skincare|skin care|pigment|sunscreen|retino|retinol|moistur|niacinamide|azelaic|пигмент|ретин|увлажн|уход|крем|сыворот|солнц',
-    'aesthetic_procedures': r'radiofrequency|laser|\bRF\b|\bBBL\b|\bIPL\b|inject|rejuvenat|лазер|инъекц|процедур|омоложен',
+    'home_skincare': r'topical|skincare|skin care|pigment|sunscreen|retino|retinol|moistur|niacinamide|azelaic|acne|rosacea|wrinkl|пигмент|ретин|увлажн|уход|крем|сыворот|солнц|акне|розаце|морщин|сухост.{0,15}(?:кож|лиц)',
+    'aesthetic_procedures': r'radiofrequency|laser|fotona|\bRF\b|\bBBL\b|\bIPL\b|inject|rejuvenat|фотон|лазер|инъекц|процедур|омоложен',
     'home_devices_massage': r'home|device|\bLED\b|massage|microcurrent|домашн|устройств|массаж|микроток',
     'finished_cosmetics': r'finished|product|moistur|cream|serum|sunscreen|cosmetic|готов.{0,10}продукт|косметик|крем|сыворот',
 }
@@ -111,6 +111,15 @@ def _adult_context(text, *, results=False):
     return False
 
 
+def question_uses_reader_bounds(question):
+    text = normalized(question)
+    explicit = list(DOMAIN_RULES) + [LAB_RULE, CHILD_RULE,
+        r'\bhair\b|\bscalp\b|\bnutrition\b|\bbody\b|волос|питан|тела|гормон']
+    if any(re.search(rule, text, re.I) for rule in explicit):
+        return False
+    return any(re.search(rule, text, re.I) for rule in TOPIC_SIGNALS.values())
+
+
 def assess(material, *, profile=None, purpose='reader', owner_telegram_id=None,
            question=None, review=None):
     profile = profile or load_profile()
@@ -128,7 +137,8 @@ def assess(material, *, profile=None, purpose='reader', owner_telegram_id=None,
         return result('needs_review', 'no_text')
     title = normalized(material.get('title'))
     head = title + '\n' + text[:6000]
-    if purpose == 'reader':
+    reader_bounds = purpose == 'reader' or question_uses_reader_bounds(question)
+    if reader_bounds:
         for rule in DOMAIN_RULES:
             if re.search(rule, title, re.I) or (re.search(rule, head, re.I) and not re.search(FACE_RULE, head, re.I)):
                 return result('excluded', 'off_topic')
@@ -159,7 +169,7 @@ def assess(material, *, profile=None, purpose='reader', owner_telegram_id=None,
     quote = normalized(review['evidence_quote'])
     if len(quote) < 12 or quote not in normalized(text):
         return result('needs_review', 'quote_mismatch')
-    if purpose == 'reader':
+    if reader_bounds:
         if review['application'] not in profile['applications']:
             return result('excluded', 'wrong_application')
         if review['audience'] not in profile['audiences']:
@@ -253,6 +263,8 @@ REVIEW_PROMPT = '''Оцени применимость ТОЛЬКО по пер�
 reference/professional_information может быть полезной без клинического испытания и возраста.
 Для purpose=question оценивай соответствие конкретному вопросу; это личный допуск,
 который не разрешает публикацию в общей подборке. Не переносить эффекты между задачами.
+Если reader_bounds=true, все ограничения reader по предмету, применению, аудитории,
+topic и реальным результатам на людях действуют и для личного вопроса.
 Верни {decision:eligible|excluded|needs_review,relevant:bool|null,topic:str,subject:str,application:str,audience:str,human_results:bool,
 evidence_quote:str,reason:str}. Для reader topic — ключ из profile.topics,
 application: face_neck или facial_skincare; audience: adults или general_adults.
@@ -294,6 +306,7 @@ def ensure_assessment(conn, material, *, purpose='reader', owner_telegram_id=Non
         try:
             review = llm.call(conn, 'reader_review', REVIEW_PROMPT, {
                 'profile': profile, 'purpose': purpose, 'question': question,
+                'reader_bounds': purpose == 'reader' or question_uses_reader_bounds(question),
                 'material': {key: material.get(key) for key in ('title', 'source_role', 'text_scope')},
                 'text': material.get('text', '')[:18000],
             })

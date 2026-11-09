@@ -71,7 +71,8 @@ class DeferredSynthesisPostgresTests(unittest.TestCase):
                                for f in data["facts"]],
                     "limitations": [], "contradictions": [], "missing_data": []}
         if stage == "synthesis_verify":
-            return {"valid": True}
+            return {"claims": [{"index": i, "valid": True, "code": "supported"}
+                               for i in range(len(data["answer"]["claims"]))], "notes_valid": True}
         raise AssertionError("Unexpected deferred model stage: " + stage)
 
     def refresh(self, at=None, *, conn=None):
@@ -414,7 +415,8 @@ class DeferredSynthesisPostgresTests(unittest.TestCase):
                 return {"claims": [{"text": "Synthetic answer", "fact_ids": [f["id"]]} for f in data["facts"]],
                         "limitations": [], "contradictions": [], "missing_data": []}
             if stage == "answer_verify":
-                return {"valid": True}
+                return {"claims": [{"index": i, "valid": True, "code": "supported"}
+                                   for i in range(len(data["answer"]["claims"]))], "notes_valid": True}
             return processing(conn, stage, instructions, data)
 
         collection = {"material_ids": [candidate["id"]], "failed_sources": [],

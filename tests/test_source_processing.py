@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import llm
 import research
+import relevance
 from collector import main as collector
 from collector import exa
 from worker import main as worker
@@ -37,6 +38,8 @@ class AnswerBoundaryDB:
         self.saved = []
 
     def execute(self, sql, args=()):
+        if "FROM materials" in sql and "m.status='done' AND f.verified" in sql:
+            return Result()
         if "FROM materials" in sql and "text_scope" in sql:
             return Result(self.candidates)
         if "INSERT INTO answers" in sql:
@@ -95,7 +98,8 @@ def model_fixture(conn, stage, instructions, data):
         return {"claims": [{"text": "Проверенный результат фикстуры", "fact_ids": [data["facts"][0]["id"]]}],
                 "limitations": [], "contradictions": [], "missing_data": []}
     if stage in {"answer_verify", "synthesis_verify"}:
-        return {"valid": True}
+        return {"claims": [{"index": i, "valid": True, "code": "supported"}
+                           for i in range(len(data["answer"]["claims"]))], "notes_valid": True}
     raise AssertionError("Unexpected model stage: " + stage)
 
 
@@ -122,13 +126,13 @@ class ProcessingBoundaryTests(unittest.TestCase):
         conn = AnswerBoundaryDB([(11, "Retinol good", QUOTE, "excerpt"), (12, "Retinol failed", QUOTE, "excerpt")])
         stored = []
 
-        def process(conn, row, force=False):
+        def process(conn, row, force=False, **kwargs):
             if row[0] == 11:
                 stored.append(fact_fixture())
                 return {"status": "processed", "facts_saved": 1, "synthesis_errors": []}
             raise ValueError("Synthetic material failed")
 
-        with patch.object(research, "fact_context", side_effect=lambda *args: list(stored)) as reread, \
+        with patch.object(research, "fact_context", side_effect=lambda *args, **kwargs: list(stored)) as reread, \
                 patch.object(collector, "search", return_value={"material_ids": [11, 12], "failed_sources": []}), \
                 patch.object(worker, "process_material", side_effect=process), \
                 patch.object(llm, "call", side_effect=model_fixture), patch.object(research, "Jsonb", side_effect=lambda value: value):
@@ -147,7 +151,7 @@ class ProcessingBoundaryTests(unittest.TestCase):
             stored.append(fact_fixture())
             raise RuntimeError("Synthetic post-save synthesis failure")
 
-        with patch.object(research, "fact_context", side_effect=lambda *args: list(stored)) as reread, \
+        with patch.object(research, "fact_context", side_effect=lambda *args, **kwargs: list(stored)) as reread, \
                 patch.object(collector, "search", return_value={"material_ids": [11], "failed_sources": []}), \
                 patch.object(worker, "process_material", side_effect=process), \
                 patch.object(llm, "call", side_effect=model_fixture), patch.object(research, "Jsonb", side_effect=lambda value: value):
@@ -271,6 +275,10 @@ class ProcessingPostgresTests(unittest.TestCase):
         mid = self.material()
         with patch.object(collector, "search", return_value={"material_ids": [mid], "failed_sources": []}), \
                 patch.object(llm, "call", side_effect=model_fixture) as model:
+            # This test covers later COMMON synthesis failure, so its material
+            # must have genuine public admission before private question use.
+            admitted = relevance.ensure_assessment(self.conn, relevance.get_material(self.conn, mid))
+            self.assertEqual(admitted["status"], "eligible")
             result = research.answer(self.conn, "retinol", owner_telegram_id=42)
         self.assertFalse(any(call.args[1].startswith("synthesis") for call in model.call_args_list))
         self.assertTrue(result["claims"])
@@ -394,6 +402,8 @@ class ProcessingPostgresTests(unittest.TestCase):
                              VALUES (%s,'Legacy fixture','fixture','fixture','guideline',TRUE)""", (mid,))
         self.conn.execute("INSERT INTO facts(material_id,statement,quote) VALUES (%s,'Retinol fixture fact',%s)", (mid, QUOTE))
         with patch.object(llm, "call", side_effect=model_fixture):
+            admitted = relevance.ensure_assessment(self.conn, relevance.get_material(self.conn, mid))
+            self.assertEqual(admitted["status"], "eligible")
             result = research.grounded(self.conn, "answer", "retinol", research.fact_context(self.conn, "retinol"))
         self.assertEqual(result["sources"][0]["kind"], "expert")
         self.assertEqual(result["sources"][0]["source_role"], "professional_information")

@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS material_assessments(
  details JSONB NOT NULL,reviewed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  UNIQUE(material_id,profile_version,text_version,scope_key));
 CREATE INDEX IF NOT EXISTS material_assessments_reader ON material_assessments(profile_version,scope_key,status,material_id);
+-- Russian search must work even on clusters initialized with the C locale.
+CREATE OR REPLACE FUNCTION reader_casefold(TEXT) RETURNS TEXT
+LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+ SELECT translate(lower(coalesce($1,'')),
+   'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ',
+   'абвгдеёжзийклмнопрстуфхцчшщъыьэюя')
+$$;
 CREATE TABLE IF NOT EXISTS topic_refresh(
  topic TEXT PRIMARY KEY,revision BIGINT NOT NULL DEFAULT 1,done_revision BIGINT NOT NULL DEFAULT 0,
  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','running','ready','failed')),

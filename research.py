@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime,timedelta,timezone
 import relevance
-from evidence import validate_claims
+from evidence import split_claims, verified_checks
 from db import jsonb as Jsonb
 from net import safe_error, ERROR_REASONS
 
@@ -48,7 +48,7 @@ def _answer_status(result,collection,processing,errors,facts):
     incomplete=incomplete or any(c.get('planned',True) and (not c.get('complete',c.get('status') in {'success','empty','no_text'}) or c.get('status')=='partial') for c in checks)
     incomplete=incomplete or any(p.get('status') in {'failed','locked'} or p.get('synthesis_errors') for p in processing)
     if result.get('claims'):
-        return 'partial' if incomplete or any(c.get('planned',True) and c.get('status')=='no_text' for c in checks) else 'completed'
+        return 'partial' if incomplete or result.get('grounding_partial') or any(c.get('planned',True) and c.get('status')=='no_text' for c in checks) else 'completed'
     if incomplete:
         return 'failed'
     checked=bool(facts) or any(c.get('planned',True) and c.get('complete',c.get('status') in {'success','empty','no_text'}) for c in checks)
@@ -56,12 +56,76 @@ def _answer_status(result,collection,processing,errors,facts):
     checked=checked or bool(collection and 'checks' not in collection and not collection.get('failed_sources'))
     return 'insufficient_data' if checked else 'failed'
 
-def fact_context(conn,query,*,reader_only=False):
-    words=[w for w in re.findall(r'[\w-]+',query) if len(w)>1][:12]
-    patterns=['%'+w+'%' for w in words] or ['%'+query+'%']
-    gate=(' AND '+relevance.reader_condition('m')) if reader_only else ''
-    params=(patterns,patterns,patterns)+( (relevance.load_profile()['version'],) if reader_only else () )
-    rows=conn.execute("SELECT x.id,x.statement,x.quote,x.payload,m.id,m.title,m.url,m.text_scope,f.kind,m.source_role FROM facts x JOIN materials m ON m.id=x.material_id JOIN findings f ON f.material_id=m.id WHERE x.active AND m.status='done' AND f.verified AND (m.title ILIKE ANY(%s) OR x.statement ILIKE ANY(%s) OR f.topics::text ILIKE ANY(%s))"+gate+" ORDER BY x.id DESC LIMIT 80",params).fetchall()
+STOPWORDS=set('что от и или как про для это этот эта эти чем помогает помогают работает работают работает ли насколько эффективность расскажи расскажите известно есть мне пожалуйста по на в с о об а до после без при такой такая какие какой кожа кожи кожей лицо лица лице лицу шея шеи уход ухода применение применения данные исследований исследование why what how does do the a an and or of for with about is are help helps efficacy effective effectiveness tell me know study evidence facial face neck skin care'.split())
+CONCEPTS={
+    'retinol': ('retinol', 'ретинол'),
+    'retinal': ('retinal', 'ретиналь'),
+    'pigmentation': ('pigment', 'пигмент', 'melasma', 'мелазм', 'dark spots', 'пятен', 'пятна', 'пятно'),
+    'fotona': ('fotona', 'фотона', 'фотон'),
+    'radiofrequency': ('radiofrequency', 'радиочастот', 'rf'),
+    'niacinamide': ('niacinamide', 'ниацинамид'),
+    'vitamin_c': ('vitamin c', 'витамин c', 'витамин с', 'ascorb', 'аскорбин'),
+    'acne': ('acne', 'акне', 'угре'),
+    'aging': ('photoaging', 'wrinkl', 'aging', 'морщин', 'фотостарен', 'старен'),
+    'irritation': ('irritat', 'раздражен'),
+    'moisturizing': ('moistur', 'hydration', 'увлажнен'),
+    'sunscreen': ('sunscreen', 'spf', 'солнцезащит'),
+    'rosacea': ('rosacea', 'розаце'),
+    'pores': ('pores', 'поры', 'пор '),
+    'vaginal': ('vaginal', 'влагалищ'),
+    'dryness': ('dryness', 'сухост'),
+}
+
+
+def _has_term(text, term):
+    return bool(re.search(r'(?<!\w)'+re.escape(term)+(r'(?!\w)' if term=='rf' else ''), text, re.I))
+
+
+def _query_groups(query):
+    text=relevance.normalized(query).lower()
+    groups=[terms for terms in CONCEPTS.values() if any(_has_term(text,t) for t in terms)]
+    covered={word for group in groups for term in group if _has_term(text,term)
+             for word in re.findall(r'[\w-]+',term)}
+    for word in dict.fromkeys(re.findall(r'[\w-]+',text)):
+        if (word in STOPWORDS or word in covered or word.startswith('эффектив')
+                or len(word)<3 or any(_has_term(word,t) for group in groups for t in group)):
+            continue
+        groups.append((word,))
+    return groups[:12]
+
+
+def _query_patterns(query):
+    return ['%'+term.replace('%','').replace('_','')+'%' for group in _query_groups(query) for term in group]
+
+
+def _subject_matches(fact, question):
+    text=' '.join(str(fact.get(k,'')) for k in ('title','statement','quote')).lower()
+    return [any(_has_term(text,term) for term in group) for group in _query_groups(question)]
+
+
+def _facts_sufficient(facts, question):
+    groups=_query_groups(question)
+    if not groups or re.search(r'\b(?:этот|эта|это|this|that)\b',question,re.I):
+        return False
+    unique={fact['id']:fact for fact in facts if any(_subject_matches(fact,question))}
+    return len(unique)>=4 and all(any(_subject_matches(f,question)[i] for f in unique.values()) for i in range(len(groups)))
+
+
+def fact_context(conn,query,*,reader_only=False,owner_telegram_id=None,question=None):
+    patterns=_query_patterns(query)
+    if not patterns:
+        return []
+    version=relevance.load_profile()['version']
+    gate=relevance.reader_condition('m')
+    params=(patterns,patterns,patterns,version)
+    if not reader_only and owner_telegram_id is not None and question:
+        private=relevance.scope_key('question',owner_telegram_id,question)
+        gate='('+gate+''' OR EXISTS(SELECT 1 FROM material_assessments pa WHERE pa.material_id=m.id
+            AND pa.profile_version=%s AND pa.scope_key=%s AND pa.status='eligible'
+            AND pa.text_version=reader_text_version(m.title,m.text,m.text_scope,m.source_role)))'''
+        params+=(version,private)
+    search_column='f.topics::text' if reader_only else 'x.quote'
+    rows=conn.execute("SELECT x.id,x.statement,x.quote,x.payload,m.id,m.title,m.url,m.text_scope,f.kind,m.source_role FROM facts x JOIN materials m ON m.id=x.material_id JOIN findings f ON f.material_id=m.id WHERE x.active AND m.status='done' AND f.verified AND (reader_casefold(m.title) LIKE ANY(%s) OR reader_casefold(x.statement) LIKE ANY(%s) OR reader_casefold("+search_column+") LIKE ANY(%s)) AND "+gate+" ORDER BY x.id DESC LIMIT 80",params).fetchall()
     from worker.main import bounded_kind
     facts=[]
     for row in rows:
@@ -70,7 +134,8 @@ def fact_context(conn,query,*,reader_only=False):
         # Old findings may predate deterministic role bounds. Keep the origin
         # restriction at read time as well as during new material processing.
         fact['kind']=bounded_kind(fact['kind'],fact['source_role'])
-        facts.append(fact)
+        if reader_only or any(_subject_matches(fact, query)):
+            facts.append(fact)
     return facts
 
 PROMPT='Составь справочный ответ по-русски только по переданным фактам. Верни {claims:[{text:str,fact_ids:[int]}],limitations:[str],contradictions:[str],missing_data:[str]}. Все содержательные утверждения включая ограничения и противоречия должны быть в claims с fact_ids. Остальные списки только для пробелов и ограничений процесса. Не сравнивай несопоставимые показатели, не считай универсальный процент эффективности. Отделяй отзывы, экспертное мнение и рекламу от научных результатов. Не переноси доказательства ингредиента на продукт. Отмечай аннотации. Неизвестное обозначай. Числа используй только с условиями и сроками. Не назначай лечение.'
@@ -96,16 +161,65 @@ subject_identified=false только когда предмет невозмож
 def grounded(conn,stage,question,facts,*,activity=None):
     if not facts:
         return {'claims':[],'limitations':['В базе нет проверенных фактов для ответа.'],'contradictions':[],'missing_data':['Недостаточно данных'],'sources':[]}
-    result=llm.call(conn,stage,PROMPT,{'question':question,'facts':facts})
+    raw=llm.call(conn,stage,PROMPT,{'question':question,'facts':facts})
     if activity is not None:
         activity['generated']=True
-    validate_claims(result,{f['id'] for f in facts})
-    if any(not isinstance(claim.get('text'),str) or not claim['text'].strip() for claim in result['claims']):
+    claims,indices,checks=split_claims(raw,{f['id'] for f in facts})
+    if not raw['claims'] and stage=='answer':
+        # Abstention contains no rejected assertion. Never publish raw notes as
+        # an alternative route for unverified advice or an absence-of-effect claim.
+        return {'claims':[],'limitations':[], 'contradictions':[],
+                'missing_data':['Предоставленных фактов недостаточно для обоснованного ответа.'],
+                'sources':[],'claim_checks':[],'claim_sources':[]}
+    allowed={f['id']:f for f in facts}
+    claim_sources=[]
+    for index,claim in enumerate(raw['claims']):
+        ids=claim.get('fact_ids') if isinstance(claim,dict) else None
+        valid_ids=list(dict.fromkeys(i for i in ids if type(i) is int and i in allowed)) if isinstance(ids,list) else []
+        mids=sorted({allowed[i]['material_id'] for i in valid_ids if type(allowed[i].get('material_id')) is int})
+        claim_sources.append({'index':index,'fact_ids':valid_ids,'material_ids':mids})
+    result={'claims':claims}
+    for key in ('limitations','contradictions','missing_data'):
+        values=raw.get(key,[])
+        if not isinstance(values,list) or any(not isinstance(value,str) for value in values):
+            from net import SourceError
+            raise SourceError('validation_error')
+        result[key]=values
+    if claims:
+        check=llm.call(conn,stage+'_verify',
+            'Проверь КАЖДОЕ утверждение только по указанным в нём fact_ids. Индексы с нуля. '
+            'Верни {claims:[{index:int,valid:bool,code:str}],notes_valid:bool}, ровно один результат на индекс. '
+            'code=supported только при valid=true; иначе unsupported, wrong_subject, wrong_population, '
+            'wrong_protocol, unsupported_number или personal_advice. Проверяй предмет, популяцию, протокол, '
+            'числа/сроки, назначения и перенос ингредиент→продукт. notes_valid=false, если любой текст '
+            'в limitations/contradictions/missing_data содержит клиническое утверждение, неподтверждённый '
+            'вывод или назначение. Эти списки допустимы только для пробелов и ограничений процесса. '+SOURCE_RULES,
+            {'answer':result,'facts':facts})
+        try:
+            verdicts,notes_valid=verified_checks(check,len(claims))
+        except ValueError as error:
+            error.claim_checks=sorted(checks+[
+                {'index':index,'valid':False,'code':'verification_format'} for index in indices],
+                key=lambda c:c['index'])
+            error.claim_sources=claim_sources
+            raise
+        result['claims']=[claim for i,claim in enumerate(claims) if verdicts[i]['valid']]
+        checks.extend({'index':indices[i],'valid':verdicts[i]['valid'],'code':verdicts[i]['code']} for i in range(len(claims)))
+    else:
+        notes_valid=False
+    if not notes_valid:
+        for key in ('limitations','contradictions','missing_data'):
+            result[key]=[]
+        result['limitations']=['Непроверенные примечания исключены из ответа.']
+    result['claim_checks']=sorted(checks,key=lambda c:c['index'])
+    result['claim_sources']=claim_sources
+    result['grounding_partial']=any(not c['valid'] for c in checks) or not notes_valid
+    if not result['claims']:
         from net import SourceError
-        raise SourceError('validation_error')
-    check=llm.call(conn,stage+'_verify','Проверь каждое утверждение ответа по фактам. Верни {valid:bool}. Отклоняй неподтверждённые числа, ложные прямые сравнения, персональные назначения, выводы из отсутствия данных и необоснованный перенос ингредиент→продукт. '+SOURCE_RULES,{'answer':result,'facts':facts})
-    if check.get('valid') is not True:
-        raise ValueError('Ответ не прошёл проверку оснований')
+        error=SourceError('grounding_rejected')
+        error.claim_checks=result['claim_checks']
+        error.claim_sources=claim_sources
+        raise error
     used={i for c in result['claims'] for i in c['fact_ids']}
     result['sources']=[f for f in facts if f['id'] in used]
     return result
@@ -249,6 +363,46 @@ def refresh_topics(conn,now=None,limit=30):
             reports.append({'topic':topic,'status':'failed','error':safe_error(error,'synthesis')})
     return reports
 
+def _answer_facts(conn, question, lookup, owner_telegram_id):
+    current={}
+    for query in dict.fromkeys((question,lookup)):
+        for fact in fact_context(conn,query,owner_telegram_id=owner_telegram_id,question=question):
+            current[fact['id']]=fact
+    return list(current.values())[:80]
+
+
+def _review_existing(conn, lookup, question, owner_telegram_id, reviewed):
+    """Targeted readmission of already verified facts; never re-extract them."""
+    remaining=min(int(relevance.load_profile()['legacy_per_question']),8)-len(reviewed)
+    patterns=_query_patterns(lookup)
+    if remaining<=0 or not patterns or re.search(r'\b(?:этот|эта|это|this|that)\b',question,re.I):
+        return []
+    purpose='question' if owner_telegram_id is not None else 'reader'
+    scope=relevance.scope_key(purpose,owner_telegram_id,question)
+    version=relevance.load_profile()['version']
+    rows=conn.execute('''SELECT m.id,m.title,m.text,m.text_scope,m.source_role FROM materials m
+        JOIN findings f ON f.material_id=m.id WHERE m.status='done' AND f.verified
+        AND NOT(m.id=ANY(%s)) AND EXISTS(SELECT 1 FROM facts x WHERE x.material_id=m.id
+            AND x.active AND (reader_casefold(m.title) LIKE ANY(%s) OR
+                reader_casefold(x.statement) LIKE ANY(%s) OR reader_casefold(x.quote) LIKE ANY(%s)))
+        AND NOT EXISTS(SELECT 1 FROM material_assessments a WHERE a.material_id=m.id
+            AND a.profile_version=%s AND a.text_version=reader_text_version(m.title,m.text,m.text_scope,m.source_role)
+            AND ((a.scope_key='reader' AND a.status='eligible') OR
+                 (a.scope_key=%s AND a.status<>'needs_review')))
+        ORDER BY m.id DESC LIMIT %s''',
+        (list(reviewed),patterns,patterns,patterns,version,scope,remaining)).fetchall()
+    reports=[]
+    for row in rows:
+        reviewed.add(row[0])
+        assessment=relevance.ensure_assessment(conn,relevance.material_from_row(row),purpose=purpose,
+            owner_telegram_id=owner_telegram_id,question=question)
+        reports.append({'material_id':row[0],'status':'reviewed','assessment':assessment})
+        # Do not spend remaining reviews if enough existing facts are now usable.
+        if _facts_sufficient(_answer_facts(conn,question,lookup,owner_telegram_id),question):
+            break
+    return reports
+
+
 def answer(conn,question,owner_telegram_id=None):
     if not isinstance(question,str) or not question.strip() or len(question)>2000:
         raise ValueError('Вопрос должен содержать от 1 до 2000 символов')
@@ -263,7 +417,7 @@ def answer(conn,question,owner_telegram_id=None):
     scope_id=question_scope(question,owner_telegram_id)
     errors=[]
     try:
-        facts=fact_context(conn,question)
+        facts=_answer_facts(conn,question,question,owner_telegram_id)
     except Exception as error:
         facts=[]
         errors.append(safe_error(error,'processing'))
@@ -273,7 +427,14 @@ def answer(conn,question,owner_telegram_id=None):
     clarification_result=None
     phase='planning'
     lookup=question
-    if len(facts)<4:
+    reviewed=set()
+    if not _facts_sufficient(facts,question):
+        try:
+            processing.extend(_review_existing(conn,question,question,owner_telegram_id,reviewed))
+            facts=_answer_facts(conn,question,question,owner_telegram_id)
+        except Exception as error:
+            errors.append(safe_error(error,'processing'))
+    if not _facts_sufficient(facts,question):
         try:
             plan=llm.call(conn,'search_plan',SEARCH_PROMPT,{'question':question})
             if not isinstance(plan,dict):
@@ -301,8 +462,12 @@ def answer(conn,question,owner_telegram_id=None):
             terms=[t.strip() for t in plan.get('terms',[]) if isinstance(t,str) and t.strip()][:12]
             # fact_context bounds words: put identified subject before the broad question.
             lookup=' '.join(terms+[query,question])
+            phase='processing'
+            processing.extend(_review_existing(conn,lookup,question,owner_telegram_id,reviewed))
+            facts=_answer_facts(conn,question,lookup,owner_telegram_id)
             phase='search'
-            collection=search(conn,query,scope_id=scope_id,owner_telegram_id=owner_telegram_id)
+            collection=({} if _facts_sufficient(facts,question) else
+                        search(conn,query,scope_id=scope_id,owner_telegram_id=owner_telegram_id))
             if collection.get('failed_sources'):
                 status.append('Часть источников недоступна: '+', '.join(collection['failed_sources']))
             patterns=['%'+t+'%' for t in terms] or ['%'+question+'%']
@@ -318,14 +483,19 @@ def answer(conn,question,owner_telegram_id=None):
                 rows=conn.execute("SELECT m.id,m.title,m.text,m.text_scope FROM materials m LEFT JOIN findings f ON f.material_id=m.id WHERE (m.status='new' OR (m.status='done' AND NOT coalesce(f.verified,FALSE))) AND (m.title ILIKE ANY(%s) OR f.summary ILIKE ANY(%s)) ORDER BY m.id DESC LIMIT 8",(patterns,patterns)).fetchall()
             phase='processing'
             for row in rows[:8]:
+                if _facts_sufficient(facts,question):
+                    break
                 try:
                     conn.execute('UPDATE materials SET attempts=attempts+1 WHERE id=%s',(row[0],))
-                    report=process_material(conn,row,force=True) or {}
+                    report=process_material(conn,row,force=True,
+                        purpose='question' if owner_telegram_id is not None else 'reader',
+                        owner_telegram_id=owner_telegram_id,question=question) or {}
                     processing.append(dict(report,material_id=row[0]))
                     if report.get('status')=='locked':
                         conn.execute('UPDATE materials SET attempts=attempts-1 WHERE id=%s',(row[0],))
                     if report.get('synthesis_errors'):
                         status.append('Проверенные факты сохранены; синтез по части тем не завершён.')
+                    facts=_answer_facts(conn,question,lookup,owner_telegram_id)
                 except llm.BudgetExceeded:
                     conn.execute('UPDATE materials SET attempts=attempts-1 WHERE id=%s',(row[0],))
                     processing.append(dict(safe_error(llm.BudgetExceeded(),'processing'),material_id=row[0],status='failed'))
@@ -340,7 +510,7 @@ def answer(conn,question,owner_telegram_id=None):
                     conn.execute("""UPDATE materials SET status='failed',last_error=%s WHERE id=%s
                         AND status<>'done' AND text IS NOT DISTINCT FROM %s AND text_scope=%s""",
                         (reason,row[0],row[2],row[3]))
-            if 'material_ids' in collection and collection['material_ids']:
+            if not _facts_sufficient(facts,question) and 'material_ids' in collection and collection['material_ids']:
                 pending=conn.execute("SELECT id,status FROM materials WHERE id=ANY(%s) AND status IN ('new','failed')",
                                      (collection['material_ids'],)).fetchall()
                 if pending:
@@ -356,24 +526,32 @@ def answer(conn,question,owner_telegram_id=None):
             # translated terms must not displace an existing Russian subject.
             # Never merge the stale initial snapshot: those facts may be retired.
             if clarification_result is None:
-                current=[]
-                seen=set()
                 try:
-                    for current_query in dict.fromkeys((question,lookup)):
-                        for fact in fact_context(conn,current_query):
-                            if fact['id'] not in seen:
-                                current.append(fact)
-                                seen.add(fact['id'])
+                    facts=_answer_facts(conn,question,lookup,owner_telegram_id)
                 except Exception as error:
                     errors.append(safe_error(error,'processing'))
-                    current=[]
-                facts=current[:80]
+                    facts=[]
     try:
         result=grounded(conn,'answer',question,facts)
     except Exception as error:
-        errors.append(safe_error(error,'answer'))
+        info=safe_error(error,'answer')
+        if getattr(error,'claim_checks',None) is not None:
+            info['claim_checks']=error.claim_checks
+            info['claim_sources']=error.claim_sources
+        errors.append(info)
         # A rejected model output is never published, even as a partial answer.
         result={'claims':[],'limitations':[],'contradictions':[],'missing_data':[],'sources':[]}
+    # Admission failures must remain technical failures, even when a later
+    # source check legitimately finishes empty. Uncertainty alone is not error.
+    for report in processing:
+        assessment=report.get('assessment') or {}
+        for info in list(report.get('errors',[]))+list(assessment.get('errors',[])):
+            if isinstance(info,dict) and isinstance(info.get('code'),str) and info['code'] in ERROR_REASONS:
+                error={'code':info['code'],'reason':ERROR_REASONS[info['code']],'stage':'processing'}
+                if type(report.get('material_id')) is int:
+                    error['material_id']=report['material_id']
+                if error not in errors:
+                    errors.append(error)
     result.setdefault('limitations',[]).extend(status)
     result['scope_id']=scope_id
     result['source_checks']=collection.get('checks',[])

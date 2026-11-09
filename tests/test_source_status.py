@@ -65,7 +65,8 @@ def model(conn, stage, instructions, data):
         return {"claims": [{"text": "Подтверждённый результат", "fact_ids": [data["facts"][0]["id"]]}],
                 "limitations": [], "missing_data": [], "contradictions": []}
     if stage == "answer_verify":
-        return {"valid": True}
+        return {"claims": [{"index": i, "valid": True, "code": "supported"}
+                           for i in range(len(data["answer"]["claims"]))], "notes_valid": True}
     raise AssertionError("Unexpected stage: " + stage)
 
 
@@ -122,7 +123,7 @@ class AnswerStateTests(unittest.TestCase):
         conn = AnswerDB(rows)
         collection = {"material_ids": [11] if processing_error else [], "checks": checks,
                       "failed_sources": list(failed_sources)}
-        with patch.object(research, "fact_context", side_effect=lambda *args: list(facts)), \
+        with patch.object(research, "fact_context", side_effect=lambda *args, **kwargs: list(facts)), \
                 patch.object(collector, "search", return_value=collection), patch.object(llm, "call", side_effect=model), \
                 patch.object(worker, "process_material", side_effect=processing_error), \
                 patch.object(research, "Jsonb", side_effect=lambda value: value):
@@ -191,7 +192,10 @@ class AnswerStateTests(unittest.TestCase):
         conn = AnswerDB()
 
         def reject(conn, stage, instructions, data):
-            return {"valid": False} if stage == "answer_verify" else model(conn, stage, instructions, data)
+            if stage == "answer_verify":
+                return {"claims": [{"index": i, "valid": False, "code": "unsupported"}
+                                   for i in range(len(data["answer"]["claims"]))], "notes_valid": True}
+            return model(conn, stage, instructions, data)
 
         with patch.object(research, "fact_context", return_value=[fact()]), \
                 patch.object(collector, "search", return_value={"material_ids": [], "checks": [check("success")], "failed_sources": []}), \

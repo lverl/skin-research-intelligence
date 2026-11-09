@@ -76,7 +76,10 @@ class PostgresTests(unittest.TestCase):
             if stage in ('synthesis','answer'):
                 fid=data['facts'][0]['id']
                 return {'claims':[{'text':'Тестовый вывод по цитате','fact_ids':[fid]}],'limitations':['Аннотация'],'contradictions':[],'missing_data':[]}
-            if stage in ('synthesis_verify','answer_verify','digest_verify'): return {'valid':True}
+            if stage in ('synthesis_verify','answer_verify'):
+                return {'claims':[{'index':i,'valid':True,'code':'supported'}
+                                  for i in range(len(data['answer']['claims']))],'notes_valid':True}
+            if stage=='digest_verify': return {'valid':True}
             if stage=='search_plan': return {'query':topic,'terms':[self.suffix],'clarification':''}
             if stage=='digest': return {'items':[{'material_ids':[mid],'title':'Исследование','summary':'Тестовый пересказ','significance':'Новые данные','limitations':'Аннотация'}]}
             raise AssertionError(stage)

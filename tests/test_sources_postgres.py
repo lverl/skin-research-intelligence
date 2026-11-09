@@ -66,7 +66,10 @@ class SourceAcceptancePostgresTests(unittest.TestCase):
                 return {"claims": [{"text": "Подтверждённый факт " + str(fact["id"]), "fact_ids": [fact["id"]]} for fact in data["facts"]],
                         "limitations": ["Справочные страницы и публичное резюме, а не три клинических исследования"],
                         "missing_data": [], "contradictions": []}
-            if stage in {"synthesis_verify", "answer_verify", "digest_verify"}:
+            if stage in {"synthesis_verify", "answer_verify"}:
+                return {"claims": [{"index": i, "valid": True, "code": "supported"}
+                                   for i in range(len(data["answer"]["claims"]))], "notes_valid": True}
+            if stage == "digest_verify":
                 return {"valid": True}
             if stage == "digest":
                 return {"items": [{"material_ids": [candidate["id"]], "title": "Материал об уходе",
