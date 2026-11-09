@@ -26,16 +26,13 @@ def bounded_kind(kind, source_role):
     return kind
 
 
-def _synthesize_topics(conn, topics):
-    """Facts are already committed. A later synthesis failure cannot retire them."""
-    from research import synthesize
-    errors=[]
-    for topic in sorted(set(topics)):
-        try:
-            synthesize(conn,topic)
-        except Exception as error:
-            errors.append(safe_error(error,'synthesis'))
-    return errors
+def _mark_public_topics(conn,mid,topics):
+    # A question-only admission must not create shared thematic state. Historic
+    # public admission still needs invalidation when its facts are retired.
+    public=conn.execute("""SELECT 1 FROM material_assessments WHERE material_id=%s
+        AND scope_key='reader' AND status='eligible' LIMIT 1""",(mid,)).fetchone()
+    if public:
+        db.mark_topics(conn,topics)
 
 def process_material(conn,row,force=False,*,purpose='reader',owner_telegram_id=None,question=None):
     mid=row[0]
@@ -80,8 +77,9 @@ def _process_material(conn,row,force=False,*,question=None):
             conn.execute("UPDATE materials SET status='no_text',last_error=NULL WHERE id=%s",(mid,))
             conn.execute('UPDATE facts SET active=FALSE WHERE material_id=%s',(mid,))
             conn.execute('UPDATE findings SET verified=FALSE WHERE material_id=%s',(mid,))
+            _mark_public_topics(conn,mid,previous_topics)
         return {'status':'no_text','facts_saved':0,'synthesis_errors':[]}
-    task=('Оцени релевантность конкретному вопросу: '+question+'. ' if question else 'Оцени релевантность косметологии и уходу. ')
+    task=('Классифицируй сам исходный материал, уже отобранный для отдельного вопроса; не ограничивай предмет косметологией. Темы формулируй только по исходному тексту. ' if question else 'Оцени релевантность косметологии и уходу. ')
     triage=llm.call(conn,'triage',task+'Верни {relevant:bool, important:bool, kind:str, summary:str, topics:[str]}. kind: research/review/guideline/regulatory/news/commercial/expert/experience/product. summary — краткий пересказ по-русски; topics — до 5 устойчивых русских названий тем. '+SOURCE_RULES,{'title':title,'text':text[:12000],'scope':scope,'source_role':source_role})
     if type(triage.get('relevant')) is not bool:
         raise ValueError('Некорректный отбор')
@@ -89,7 +87,8 @@ def _process_material(conn,row,force=False,*,question=None):
         with conn.transaction():
             conn.execute("UPDATE materials SET status='skipped',last_error=NULL WHERE id=%s",(mid,))
             conn.execute('UPDATE facts SET active=FALSE WHERE material_id=%s',(mid,))
-        return {'status':'skipped','facts_saved':0,'synthesis_errors':_synthesize_topics(conn,previous_topics)}
+            _mark_public_topics(conn,mid,previous_topics)
+        return {'status':'skipped','facts_saved':0,'synthesis_errors':[]}
     if triage.get('kind') not in KINDS or not isinstance(triage.get('summary'),str) or not isinstance(triage.get('topics'),list):
         raise ValueError('Некорректная классификация')
     triage['kind']=bounded_kind(triage['kind'],source_role)
@@ -130,8 +129,9 @@ def _process_material(conn,row,force=False,*,question=None):
         for fact in details['facts']:
             conn.execute('INSERT INTO facts(material_id,statement,quote,payload) VALUES (%s,%s,%s,%s) ON CONFLICT(material_id,statement,quote) DO UPDATE SET active=TRUE,payload=EXCLUDED.payload',(mid,fact['statement'],fact['quote'],Jsonb(fact.get('payload',{}))))
         conn.execute("UPDATE materials SET status='done',last_error=NULL WHERE id=%s",(mid,))
+        _mark_public_topics(conn,mid,topics+previous_topics)
     return {'status':'processed','facts_saved':len(details['facts']),
-            'synthesis_errors':_synthesize_topics(conn,topics+previous_topics)}
+            'synthesis_errors':[]}
 
 def process_new(conn):
     issues=llm.configuration_issues()
@@ -169,6 +169,7 @@ def process_new(conn):
 def main():
     from collector.main import collect,run_daily_search
     from digest import generate
+    from research import refresh_topics
     db.log('worker','Сервис запущен: сбор и обработка каждые 60 секунд; время ежедневного выпуска '+os.environ.get('DIGEST_HOUR','19')+':00 '+os.environ.get('DIGEST_TIMEZONE','Europe/Moscow'))
     ready=False
     while True:
@@ -182,6 +183,9 @@ def main():
                 run_daily_search(conn)
                 try:
                     process_new(conn)
+                    for report in refresh_topics(conn):
+                        if report.get('error'):
+                            db.log('worker','Общие выводы обновятся отдельно: '+report['error']['reason'])
                 finally:
                     generate(conn)
         except Exception as error:

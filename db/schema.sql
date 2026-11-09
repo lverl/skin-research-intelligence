@@ -60,6 +60,20 @@ CREATE TABLE IF NOT EXISTS material_assessments(
  details JSONB NOT NULL,reviewed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  UNIQUE(material_id,profile_version,text_version,scope_key));
 CREATE INDEX IF NOT EXISTS material_assessments_reader ON material_assessments(profile_version,scope_key,status,material_id);
+CREATE TABLE IF NOT EXISTS topic_refresh(
+ topic TEXT PRIMARY KEY,revision BIGINT NOT NULL DEFAULT 1,done_revision BIGINT NOT NULL DEFAULT 0,
+ state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','running','ready','failed')),
+ success_signature TEXT,attempt_signature TEXT,attempt_revision BIGINT NOT NULL DEFAULT 0,
+ attempts INTEGER NOT NULL DEFAULT 0,next_retry_at TIMESTAMPTZ,last_error JSONB,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS topic_snapshots(
+ topic TEXT NOT NULL REFERENCES topic_refresh(topic),input_signature TEXT NOT NULL,
+ profile_version TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
+ next_retry_at TIMESTAMPTZ,last_error JSONB,successful BOOLEAN NOT NULL DEFAULT FALSE,
+ PRIMARY KEY(topic,input_signature));
+ALTER TABLE conclusions ADD COLUMN IF NOT EXISTS input_signature TEXT;
+ALTER TABLE conclusions ADD COLUMN IF NOT EXISTS profile_version TEXT;
+ALTER TABLE conclusions ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT FALSE;
 -- Exa reservation commits on a separate connection: no FK to uncommitted runs.
 CREATE TABLE IF NOT EXISTS search_calls(
  id BIGSERIAL PRIMARY KEY,scope_id TEXT NOT NULL,purpose TEXT NOT NULL CHECK(purpose IN ('question','daily')),

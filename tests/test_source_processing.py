@@ -248,6 +248,12 @@ class ProcessingPostgresTests(unittest.TestCase):
         self.conn = psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True,
                                     options=f"-c search_path={self.schema} -c statement_timeout=5000 -c lock_timeout=3000")
         db.init_schema(self.conn)
+        self.model_settings = patch.dict(os.environ, {
+            "MODEL": "offline-fixture", "OPENROUTER_API_KEY": "offline-fixture",
+            "MODEL_MONTHLY_USD": "10", "MODEL_CALL_RESERVE_USD": "1",
+        })
+        self.model_settings.start()
+        self.addCleanup(self.model_settings.stop)
 
     def tearDown(self):
         self.conn.close()
@@ -261,16 +267,27 @@ class ProcessingPostgresTests(unittest.TestCase):
     def row(self, mid):
         return self.conn.execute("SELECT id,title,text,text_scope FROM materials WHERE id=%s", (mid,)).fetchone()
 
-    def test_answer_uses_actual_committed_fact_after_post_save_synthesis_failure(self):
+    def test_answer_uses_actual_committed_fact_before_later_synthesis_failure(self):
         mid = self.material()
         with patch.object(collector, "search", return_value={"material_ids": [mid], "failed_sources": []}), \
-                patch.object(research, "synthesize", side_effect=RuntimeError("Synthetic synthesis failure")), \
-                patch.object(llm, "call", side_effect=model_fixture):
+                patch.object(llm, "call", side_effect=model_fixture) as model:
             result = research.answer(self.conn, "retinol", owner_telegram_id=42)
+        self.assertFalse(any(call.args[1].startswith("synthesis") for call in model.call_args_list))
         self.assertTrue(result["claims"])
         self.assertEqual(result["sources"][0]["material_id"], mid)
+        refresh_time = datetime.now(timezone.utc)
+        with patch.object(llm, "call", side_effect=RuntimeError("Synthetic deferred synthesis failure")):
+            reports = research.refresh_topics(self.conn, now=refresh_time)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM facts WHERE material_id=%s AND active", (mid,)).fetchone()[0], 1)
         self.assertEqual(self.conn.execute("SELECT status FROM materials WHERE id=%s", (mid,)).fetchone()[0], "done")
+        self.assertNotEqual(self.conn.execute("SELECT content FROM answers ORDER BY id DESC LIMIT 1").fetchone()[0]["status"], "failed")
+        self.assertTrue(any(item["status"] == "failed" for item in reports))
+        state, attempts, next_retry, error = self.conn.execute(
+            "SELECT state,attempts,next_retry_at,last_error FROM topic_refresh WHERE topic='retinol fixture'",
+        ).fetchone()
+        self.assertEqual((state, attempts), ("pending", 1))
+        self.assertGreaterEqual((next_retry - refresh_time).total_seconds(), 15 * 60)
+        self.assertTrue(error.get("code"))
 
     def test_worker_reports_saved_fact_and_isolates_each_synthesis_topic(self):
         mid = self.material()
@@ -278,15 +295,28 @@ class ProcessingPostgresTests(unittest.TestCase):
         def model(conn, stage, instructions, data):
             if stage == "triage":
                 return {**model_fixture(conn, stage, instructions, data), "topics": ["retinol A", "retinol B"]}
+            if stage == "synthesis" and data["question"] == "retinol A":
+                raise RuntimeError("Synthetic topic failure")
             return model_fixture(conn, stage, instructions, data)
 
-        with patch.object(llm, "call", side_effect=model), \
-                patch.object(research, "synthesize", side_effect=[RuntimeError("Synthetic topic failure"), None]) as synthesize:
+        with patch.object(llm, "call", side_effect=model) as calls:
             report = worker.process_material(self.conn, self.row(mid), force=True)
+            self.assertFalse(any(call.args[1].startswith("synthesis") for call in calls.call_args_list))
+            refresh_time = datetime.now(timezone.utc)
+            research.refresh_topics(self.conn, now=refresh_time)
         self.assertEqual(report["status"], "processed")
         self.assertEqual(report["facts_saved"], 1)
-        self.assertEqual(len(report["synthesis_errors"]), 1)
-        self.assertEqual(synthesize.call_count, 2)
+        self.assertEqual(report["synthesis_errors"], [])
+        states = dict(self.conn.execute("SELECT topic,state FROM topic_refresh ORDER BY topic").fetchall())
+        self.assertEqual(states, {"retinol A": "pending", "retinol B": "ready"})
+        attempts, next_retry, error = self.conn.execute(
+            "SELECT attempts,next_retry_at,last_error FROM topic_refresh WHERE topic='retinol A'",
+        ).fetchone()
+        self.assertEqual(attempts, 1)
+        self.assertGreaterEqual((next_retry - refresh_time).total_seconds(), 15 * 60)
+        self.assertTrue(error.get("code"))
+        self.assertEqual({call.args[3]["question"] for call in calls.call_args_list if call.args[1] == "synthesis"}, {"retinol A", "retinol B"})
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM facts WHERE material_id=%s AND active", (mid,)).fetchone()[0], 1)
         self.assertEqual(self.conn.execute("SELECT status FROM materials WHERE id=%s", (mid,)).fetchone()[0], "done")
 
     def test_invalid_quote_cannot_publish_a_verified_fact(self):

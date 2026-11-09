@@ -237,6 +237,14 @@ def command_response(conn, chat_id, text, chat_type='private'):
                 lines.append(format_model_budget(llm.budget_summary(conn)))
             except Exception:
                 lines.append('Сводка бюджета модели временно недоступна.')
+            topics=conn.execute("""SELECT topic,attempts,last_error FROM topic_refresh
+                WHERE state IN ('pending','running','failed') ORDER BY updated_at LIMIT 5""").fetchall()
+            if topics:
+                from net import ERROR_REASONS
+                lines.append('Обновление общих выводов ожидается отдельно; ответы на вопросы его не ждут.')
+                for topic,attempts,error in topics:
+                    reason=ERROR_REASONS.get(error.get('code'),'Обновление ожидается') if isinstance(error,dict) else 'Обновление ожидается'
+                    lines.append(str(topic)[:120]+': '+reason+'; попыток '+str(attempts))
         for reason,count in conn.execute("SELECT last_error,count(*) FROM materials WHERE status='failed' GROUP BY last_error ORDER BY count(*) DESC LIMIT 5").fetchall():
             lines.append(f'Ошибки обработки: {reason or "причина не записана"} — {count}')
         for name,error in conn.execute('SELECT name,last_error FROM sources WHERE active AND last_error IS NOT NULL ORDER BY name LIMIT 5').fetchall():

@@ -24,6 +24,20 @@ def init_schema(conn):
 def log(service, message):
     print(f'[{service}] {message}', flush=True)
 
+
+def mark_topics(conn, topics):
+    """Call in the same transaction as fact/admission changes, in stable lock order.
+
+    Do not reset paid attempts/cooldown here: only an actually new input snapshot
+    may reset them. Redundant dirty marks must not circumvent the retry limit.
+    """
+    names = sorted({t.strip()[:200] for t in topics if isinstance(t, str) and t.strip()})
+    for topic in names:
+        conn.execute('''INSERT INTO topic_refresh(topic) VALUES (%s)
+            ON CONFLICT(topic) DO UPDATE SET revision=topic_refresh.revision+1,
+            state='pending',updated_at=now()''', (topic,))
+        conn.execute('UPDATE conclusions SET is_current=FALSE WHERE topic=%s AND is_current', (topic,))
+
 def start_run(conn, service):
     identifier=conn.execute("INSERT INTO runs(service,status) VALUES (%s,'running') RETURNING id", (service,)).fetchone()[0]
     log(service,f'Прогон {identifier} начат')

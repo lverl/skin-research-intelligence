@@ -2,6 +2,10 @@
 import db
 import llm
 import re
+import hashlib
+import json
+from datetime import datetime,timedelta,timezone
+import relevance
 from evidence import validate_claims
 from db import jsonb as Jsonb
 from net import safe_error, ERROR_REASONS
@@ -52,10 +56,12 @@ def _answer_status(result,collection,processing,errors,facts):
     checked=checked or bool(collection and 'checks' not in collection and not collection.get('failed_sources'))
     return 'insufficient_data' if checked else 'failed'
 
-def fact_context(conn,query):
+def fact_context(conn,query,*,reader_only=False):
     words=[w for w in re.findall(r'[\w-]+',query) if len(w)>1][:12]
     patterns=['%'+w+'%' for w in words] or ['%'+query+'%']
-    rows=conn.execute("SELECT x.id,x.statement,x.quote,x.payload,m.id,m.title,m.url,m.text_scope,f.kind,m.source_role FROM facts x JOIN materials m ON m.id=x.material_id JOIN findings f ON f.material_id=m.id WHERE x.active AND m.status='done' AND f.verified AND (m.title ILIKE ANY(%s) OR x.statement ILIKE ANY(%s) OR f.topics::text ILIKE ANY(%s)) ORDER BY x.id DESC LIMIT 80",(patterns,patterns,patterns)).fetchall()
+    gate=(' AND '+relevance.reader_condition('m')) if reader_only else ''
+    params=(patterns,patterns,patterns)+( (relevance.load_profile()['version'],) if reader_only else () )
+    rows=conn.execute("SELECT x.id,x.statement,x.quote,x.payload,m.id,m.title,m.url,m.text_scope,f.kind,m.source_role FROM facts x JOIN materials m ON m.id=x.material_id JOIN findings f ON f.material_id=m.id WHERE x.active AND m.status='done' AND f.verified AND (m.title ILIKE ANY(%s) OR x.statement ILIKE ANY(%s) OR f.topics::text ILIKE ANY(%s))"+gate+" ORDER BY x.id DESC LIMIT 80",params).fetchall()
     from worker.main import bounded_kind
     facts=[]
     for row in rows:
@@ -87,10 +93,12 @@ subject_identified=false только когда предмет невозмож
 При известном предмете subject_identified=true, clarification пустая строка.
 Верни {subject_identified:bool,query:str,terms:[str],clarification:str}.'''
 
-def grounded(conn,stage,question,facts):
+def grounded(conn,stage,question,facts,*,activity=None):
     if not facts:
         return {'claims':[],'limitations':['В базе нет проверенных фактов для ответа.'],'contradictions':[],'missing_data':['Недостаточно данных'],'sources':[]}
     result=llm.call(conn,stage,PROMPT,{'question':question,'facts':facts})
+    if activity is not None:
+        activity['generated']=True
     validate_claims(result,{f['id'] for f in facts})
     if any(not isinstance(claim.get('text'),str) or not claim['text'].strip() for claim in result['claims']):
         from net import SourceError
@@ -102,15 +110,144 @@ def grounded(conn,stage,question,facts):
     result['sources']=[f for f in facts if f['id'] in used]
     return result
 
-def synthesize(conn,topic):
-    facts=fact_context(conn,topic)
-    result=grounded(conn,'synthesis',topic,facts)
+def _topic_input(conn,topic):
+    profile_version=relevance.load_profile()['version']
+    facts=fact_context(conn,topic,reader_only=True)
+    ids=sorted({f['material_id'] for f in facts})
+    admissions=conn.execute('''SELECT a.material_id,a.profile_version,a.text_version,a.status,
+        a.details->>'topic',a.details->>'application',a.details->>'audience'
+        FROM material_assessments a JOIN materials m ON m.id=a.material_id
+        WHERE a.material_id=ANY(%s) AND a.scope_key='reader' AND a.profile_version=%s
+        AND a.text_version=reader_text_version(m.title,m.text,m.text_scope,m.source_role)
+        ORDER BY a.material_id''',(ids,profile_version)).fetchall() if ids else []
+    signature=hashlib.sha256(json.dumps({'profile':profile_version,'facts':facts,'admissions':admissions},
+        ensure_ascii=False,sort_keys=True,default=str).encode('utf-8')).hexdigest()
+    return facts,signature,profile_version
+
+
+def _finish_topic(conn,topic,signature,profile_version,result=None):
+    # Queue row is locked only for publication, never around a model/network call.
     with conn.transaction():
-        conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',('topic:'+topic,))
-        old=conn.execute('SELECT version,content FROM conclusions WHERE topic=%s ORDER BY version DESC LIMIT 1',(topic,)).fetchone()
-        if old and old[1]==result:
-            return
-        conn.execute('INSERT INTO conclusions(topic,version,content,reason) VALUES (%s,%s,%s,%s)',(topic,old[0]+1 if old else 1,Jsonb(result),'Новые или обновлённые проверенные факты; предыдущая версия сохранена'))
+        conn.execute('SELECT revision FROM topic_refresh WHERE topic=%s FOR UPDATE',(topic,)).fetchone()
+        facts,current_signature,current_profile=_topic_input(conn,topic)
+        if current_signature!=signature or current_profile!=profile_version:
+            conn.execute("UPDATE topic_refresh SET state='pending',updated_at=now() WHERE topic=%s",(topic,))
+            return {'topic':topic,'status':'stale'}
+        conn.execute('UPDATE conclusions SET is_current=FALSE WHERE topic=%s AND is_current',(topic,))
+        if facts:
+            if result is None:
+                prior=conn.execute('''SELECT id FROM conclusions WHERE topic=%s AND input_signature=%s
+                    AND profile_version=%s ORDER BY version DESC LIMIT 1''',(topic,signature,profile_version)).fetchone()
+                if not prior:
+                    conn.execute("UPDATE topic_refresh SET success_signature=NULL,state='pending' WHERE topic=%s",(topic,))
+                    conn.execute('UPDATE topic_snapshots SET successful=FALSE WHERE topic=%s AND input_signature=%s',
+                                 (topic,signature))
+                    return {'topic':topic,'status':'pending'}
+                conn.execute('UPDATE conclusions SET is_current=TRUE WHERE id=%s',(prior[0],))
+            else:
+                version=conn.execute('SELECT coalesce(max(version),0)+1 FROM conclusions WHERE topic=%s',(topic,)).fetchone()[0]
+                conn.execute('''INSERT INTO conclusions(topic,version,content,reason,input_signature,profile_version,is_current)
+                    VALUES (%s,%s,%s,%s,%s,%s,TRUE)''',(topic,version,Jsonb(result),
+                    'Проверенные факты и допуск актуальны; предыдущая версия сохранена',signature,profile_version))
+        conn.execute("""UPDATE topic_refresh SET done_revision=revision,state='ready',success_signature=%s,
+            attempt_signature=%s,attempt_revision=revision,attempts=0,next_retry_at=NULL,last_error=NULL,
+            updated_at=now() WHERE topic=%s""",(signature,signature,topic))
+        conn.execute('''UPDATE topic_snapshots SET successful=TRUE,attempts=0,next_retry_at=NULL,last_error=NULL
+            WHERE topic=%s AND input_signature=%s''',(topic,signature))
+    return {'topic':topic,'status':'ready' if result is not None else 'unchanged'}
+
+
+def synthesize(conn,topic,*,now=None):
+    """One deferred public topic update; independent of the answer request path."""
+    now=now or datetime.now(timezone.utc)
+    conn.execute('INSERT INTO topic_refresh(topic) VALUES (%s) ON CONFLICT DO NOTHING',(topic,))
+    locked=conn.execute('SELECT pg_try_advisory_lock(4218,hashtext(%s))',(topic,)).fetchone()[0]
+    if not locked:
+        return {'topic':topic,'status':'locked'}
+    try:
+        row=conn.execute('''SELECT revision,success_signature
+            FROM topic_refresh WHERE topic=%s''',(topic,)).fetchone()
+        revision,success=row
+        facts,signature,profile_version=_topic_input(conn,topic)
+        conn.execute('''INSERT INTO topic_snapshots(topic,input_signature,profile_version)
+            VALUES (%s,%s,%s) ON CONFLICT DO NOTHING''',(topic,signature,profile_version))
+        attempts,next_retry,successful,last_error=conn.execute('''SELECT attempts,next_retry_at,successful,last_error
+            FROM topic_snapshots WHERE topic=%s AND input_signature=%s''',(topic,signature)).fetchone()
+        if success==signature or successful or not facts:
+            return _finish_topic(conn,topic,signature,profile_version)
+        if attempts>=3:
+            conn.execute("""UPDATE topic_refresh SET state='failed',attempt_signature=%s,
+                attempt_revision=revision,attempts=%s,next_retry_at=%s,last_error=%s,updated_at=now() WHERE topic=%s""",
+                (signature,attempts,next_retry,Jsonb(last_error) if last_error else None,topic))
+            return {'topic':topic,'status':'failed','attempts':attempts}
+        if next_retry and next_retry>now:
+            conn.execute("""UPDATE topic_refresh SET attempt_signature=%s,attempt_revision=revision,
+                attempts=%s,next_retry_at=%s,last_error=%s,state='pending' WHERE topic=%s""",
+                (signature,attempts,next_retry,Jsonb(last_error) if last_error else None,topic))
+            return {'topic':topic,'status':'pending','attempts':attempts}
+        issues=llm.configuration_issues()
+        if issues:
+            from net import SourceError
+            budget_only=all(('MODEL_MONTHLY_USD' in issue or 'MODEL_CALL_RESERVE_USD' in issue)
+                            and 'больше 0' in issue for issue in issues)
+            if budget_only:
+                from decimal import Decimal
+                import os
+                for name,default in (('MODEL_MONTHLY_USD','0'),('MODEL_CALL_RESERVE_USD','1')):
+                    if any(name in issue for issue in issues):
+                        value=Decimal(os.environ.get(name,default))
+                        if not value.is_finite() or value>0:
+                            budget_only=False
+            info=safe_error(llm.BudgetExceeded() if budget_only else SourceError('configuration_error'),'synthesis')
+            conn.execute("""UPDATE topic_refresh SET state='pending',attempt_signature=%s,
+                attempt_revision=revision,attempts=%s,next_retry_at=NULL,last_error=%s WHERE topic=%s""",
+                (signature,attempts,Jsonb(info),topic))
+            return {'topic':topic,'status':'budget_blocked' if budget_only else 'configuration_blocked',
+                    'attempts':attempts,'error':info}
+        with conn.transaction():
+            conn.execute('''UPDATE topic_snapshots SET attempts=%s,next_retry_at=%s
+                WHERE topic=%s AND input_signature=%s''',
+                (attempts+1,now+timedelta(minutes=15),topic,signature))
+            conn.execute("""UPDATE topic_refresh SET state='running',attempt_signature=%s,attempt_revision=%s,
+                attempts=%s,next_retry_at=%s,updated_at=now() WHERE topic=%s""",
+                (signature,revision,attempts+1,now+timedelta(minutes=15),topic))
+        activity={}
+        try:
+            result=grounded(conn,'synthesis',topic,facts,activity=activity)
+        except Exception as error:
+            budget=isinstance(error,llm.BudgetExceeded)
+            # The first call may be denied before HTTP. A denied verification
+            # after successful generation has already consumed a paid attempt.
+            info=safe_error(error,'synthesis')
+            preflight=budget or info['code']=='configuration_error'
+            consumed=not preflight or bool(activity.get('generated'))
+            used=attempts+(1 if consumed else 0)
+            retry_at=now+timedelta(minutes=15) if consumed else None
+            with conn.transaction():
+                conn.execute('''UPDATE topic_snapshots SET attempts=%s,next_retry_at=%s,last_error=%s
+                    WHERE topic=%s AND input_signature=%s''',(used,retry_at,Jsonb(info),topic,signature))
+                conn.execute("""UPDATE topic_refresh SET state=%s,attempts=%s,next_retry_at=%s,last_error=%s,
+                    updated_at=now() WHERE topic=%s""",
+                    ('failed' if used>=3 else 'pending',used,retry_at,Jsonb(info),topic))
+            return {'topic':topic,'status':'budget_blocked' if budget else 'failed',
+                    'attempts':used,'error':info}
+        return _finish_topic(conn,topic,signature,profile_version,result)
+    finally:
+        conn.execute('SELECT pg_advisory_unlock(4218,hashtext(%s))',(topic,))
+
+
+def refresh_topics(conn,now=None,limit=30):
+    now=now or datetime.now(timezone.utc)
+    rows=conn.execute("""SELECT topic FROM topic_refresh WHERE state IN ('pending','running')
+        AND (next_retry_at IS NULL OR next_retry_at<=%s OR revision>attempt_revision)
+        ORDER BY updated_at,topic LIMIT %s""",(now,min(max(int(limit),1),30))).fetchall()
+    reports=[]
+    for (topic,) in rows:
+        try:
+            reports.append(synthesize(conn,topic,now=now))
+        except Exception as error:
+            reports.append({'topic':topic,'status':'failed','error':safe_error(error,'synthesis')})
+    return reports
 
 def answer(conn,question,owner_telegram_id=None):
     if not isinstance(question,str) or not question.strip() or len(question)>2000:

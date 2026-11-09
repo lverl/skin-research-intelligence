@@ -345,7 +345,7 @@ def run_daily_search(conn, now=None):
         return dict(base,status='disabled',planned=False,complete=False,code='disabled',reason=ERROR_REASONS['disabled'])
     with db.connect() as ledger,ledger.transaction():
         inserted=ledger.execute("""INSERT INTO daily_search_runs(day,timezone,scope_id,topic_index,status)
-            VALUES(%s,%s,%s,%s,'claimed') ON CONFLICT(day) DO NOTHING RETURNING day""",
+            VALUES(%s,%s,%s,%s,'claimed') ON CONFLICT DO NOTHING RETURNING day""",
             (day,zone_name,scope_id,topic_index)).fetchone()
         if not inserted:
             prior=ledger.execute('SELECT status,code,reason,run_id FROM daily_search_runs WHERE day=%s',(day,)).fetchone()

@@ -15,6 +15,10 @@ class PostgresTests(unittest.TestCase):
         db.init_schema(self.conn)
         self.conn.execute('BEGIN')
         self.suffix=uuid4().hex
+        self.model_settings=patch.dict(os.environ,{'MODEL':'offline-fixture','OPENROUTER_API_KEY':'offline-fixture',
+                                                   'MODEL_MONTHLY_USD':'10','MODEL_CALL_RESERVE_USD':'1'})
+        self.model_settings.start()
+        self.addCleanup(self.model_settings.stop)
 
     def tearDown(self):
         self.conn.execute('ROLLBACK')
@@ -58,7 +62,7 @@ class PostgresTests(unittest.TestCase):
     def test_complete_analysis_answer_and_daily_digest(self):
         from collector.main import ingest
         from worker.main import process_material
-        from research import answer
+        from research import answer,refresh_topics
         from digest import generate
         import llm
         mid=ingest(self.conn,self.item())
@@ -81,17 +85,19 @@ class PostgresTests(unittest.TestCase):
             process_material(self.conn,(mid,self.item()['title'],self.item()['text'],'abstract'))
             result=answer(self.conn,topic)
             self.assertEqual(result['sources'][0]['material_id'],mid)
+            self.assertEqual(self.conn.execute('SELECT count(*) FROM conclusions WHERE topic=%s',(topic,)).fetchone()[0],0)
+            refresh_topics(self.conn)
             did=generate(self.conn,datetime.now(timezone.utc))
             self.assertEqual(did,generate(self.conn,datetime.now(timezone.utc)))
         self.assertEqual(self.conn.execute('SELECT count(*) FROM facts WHERE material_id=%s AND active',(mid,)).fetchone()[0],1)
         self.assertEqual(self.conn.execute('SELECT count(*) FROM conclusions WHERE topic=%s',(topic,)).fetchone()[0],1)
         self.assertEqual(self.conn.execute('SELECT content FROM digests WHERE id=%s',(did,)).fetchone()[0]['items'][0]['material_ids'],[mid])
 
-    def test_reprocessing_retires_old_facts_and_versions_conclusion(self):
+    def test_reprocessing_retires_old_facts_and_invalidates_conclusion(self):
         from collector.main import ingest
         from worker.main import process_material
         from db import jsonb
-        from research import synthesize
+        from research import refresh_topics
         import llm
         mid=ingest(self.conn,self.item())
         topic='RF '+self.suffix
@@ -106,7 +112,13 @@ class PostgresTests(unittest.TestCase):
             raise AssertionError('No synthesis model call should be needed without facts: '+stage)
         with patch.object(llm,'call',side_effect=model):
             process_material(self.conn,(mid,self.item()['title'],self.item()['text'],'abstract'))
+            refresh_topics(self.conn)
         self.assertEqual(self.conn.execute('SELECT count(*) FROM facts WHERE material_id=%s AND active',(mid,)).fetchone()[0],0)
-        version,content=self.conn.execute('SELECT version,content FROM conclusions WHERE topic=%s ORDER BY version DESC LIMIT 1',(topic,)).fetchone()
-        self.assertEqual(version,2)
-        self.assertTrue(content['missing_data'])
+        old_content,is_current=self.conn.execute('SELECT content,is_current FROM conclusions WHERE topic=%s AND version=1',(topic,)).fetchone()
+        self.assertEqual(old_content,{})
+        self.assertFalse(is_current)
+        current=self.conn.execute('SELECT content FROM conclusions WHERE topic=%s AND is_current',(topic,)).fetchall()
+        self.assertFalse(any(row[0].get('claims') for row in current))
+        state,revision,done_revision=self.conn.execute('SELECT state,revision,done_revision FROM topic_refresh WHERE topic=%s',(topic,)).fetchone()
+        self.assertEqual(state,'ready')
+        self.assertEqual(revision,done_revision)

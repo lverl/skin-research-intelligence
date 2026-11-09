@@ -194,6 +194,9 @@ def store_assessment(conn, material, result):
         current = get_material(conn, material['id'], lock=True)
         if current is None or text_version(current) != result['text_version']:
             return False
+        prior = conn.execute('''SELECT details FROM material_assessments WHERE material_id=%s
+            AND scope_key=%s ORDER BY reviewed_at DESC,id DESC LIMIT 1''',
+            (material['id'], result['scope_key'])).fetchone()
         conn.execute('''INSERT INTO material_assessments
             (material_id,profile_version,text_version,scope_key,status,code,details)
             VALUES (%s,%s,%s,%s,%s,%s,%s)
@@ -201,6 +204,12 @@ def store_assessment(conn, material, result):
             status=EXCLUDED.status,code=EXCLUDED.code,details=EXCLUDED.details,reviewed_at=now()''',
             (material['id'], result['profile_version'], result['text_version'], result['scope_key'],
              result['status'], result['code'], db.jsonb(result)))
+        relevant_fields = ('status', 'topic', 'profile_version', 'text_version', 'application', 'audience')
+        if result['scope_key'] == 'reader' and (not prior or any(
+                prior[0].get(key) != result.get(key) for key in relevant_fields)):
+            finding = conn.execute('SELECT topics FROM findings WHERE material_id=%s', (material['id'],)).fetchone()
+            if finding and isinstance(finding[0], list):
+                db.mark_topics(conn, finding[0])
     return True
 
 
