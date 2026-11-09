@@ -13,12 +13,15 @@ KINDS={'research','review','guideline','regulatory','news','commercial','expert'
 
 SOURCE_RULES = ('Учитывай source_role: reference и professional_information — справка и объяснения для пациентов, '
     'а не отдельное исследование или формальная клиническая рекомендация; systematic_review_summary — '
-    'публичное резюме обзора, не полный текст. Оценки достоверности источника сохраняй с его авторством, '
+    'публичное резюме обзора, не полный текст. official_safety — официальное предупреждение/отзыв, '
+    'не клиническое испытание. Оценки достоверности источника сохраняй с его авторством, '
     'не создавай собственных числовых баллов. Не переноси результаты между веществами, ретиноидами, '
     'устройствами, показаниями, группами, протоколами или сроками без явно указанных оснований.')
 
 
 def bounded_kind(kind, source_role):
+    if source_role=='official_safety':
+        return 'regulatory'
     if source_role in {'reference','professional_information'}:
         return 'expert'
     if source_role in {'systematic_review','systematic_review_summary'}:
@@ -40,7 +43,7 @@ def process_material(conn,row,force=False,*,purpose='reader',owner_telegram_id=N
     if not locked:
         return {'status':'locked','facts_saved':0,'synthesis_errors':[]}
     try:
-        current=conn.execute('SELECT id,title,text,text_scope,source_role FROM materials WHERE id=%s',(mid,)).fetchone()
+        current=conn.execute('SELECT id,title,text,text_scope,source_role,url FROM materials WHERE id=%s',(mid,)).fetchone()
         snapshot=current or row
         if len(snapshot)<5:
             snapshot=tuple(snapshot)+('unknown',)

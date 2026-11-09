@@ -154,6 +154,9 @@ def source_role_for_url(url):
             return "professional_information"
         if host in {"cochrane.org", "www.cochrane.org"} and parts.path.startswith("/evidence/"):
             return "systematic_review_summary"
+        import relevance
+        if relevance.official_safety_url(url):
+            return "official_safety"
     except (ValueError, TypeError):
         pass
     return "research_candidate"

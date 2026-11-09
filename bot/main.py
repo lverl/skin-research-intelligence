@@ -101,7 +101,10 @@ def format_digest(day, content):
     if items:
         parts.append('Материалов в дайджесте: ' + str(len(items)))
     for item in items:
-        lines = ['• ' + str(item.get('summary') or item.get('title', ''))]
+        title=str(item.get('title') or item.get('summary') or '')
+        lines = ['• ' + title]
+        if item.get('summary') and item['summary']!=title:
+            lines.append(str(item['summary']))
         if item.get('limitations'):
             lines.append(str(item['limitations']))
         for source in item.get('sources', []):
@@ -111,7 +114,13 @@ def format_digest(day, content):
                 name+=' · публикация '+str(source['published_at'])[:4]+' года'
             role=source.get('source_role')
             if role in {'reference','professional_information'}: name+=' · справочный материал'
-            if role=='systematic_review_summary': name+=' · публичное резюме обзора'
+            elif role=='systematic_review_summary': name+=' · публичное резюме обзора'
+            elif role=='official_safety': name+=' · официальное сообщение о безопасности'
+            else:
+                label={'research':'исследование','review':'обзор исследований','guideline':'рекомендация',
+                       'regulatory':'регуляторный материал','expert':'экспертный материал',
+                       'news':'новость','product':'данные о продукте','experience':'личный опыт'}.get(source.get('kind'))
+                if label: name+=' · '+label
             if source.get('scope')=='abstract': name+=' · изучена аннотация'
             elif source.get('scope')=='excerpt': name+=' · доступный фрагмент'
             lines.append(name + '\n' + url)

@@ -10,9 +10,22 @@ import re
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 import db
 
 PROFILE_PATH = Path(__file__).with_name('reader_profile.json')
+OFFICIAL_SAFETY_PATHS = ('/safety/recalls-market-withdrawals-safety-alerts/',
+                         '/cosmetics/cosmetics-compliance-enforcement/')
+
+
+def official_safety_url(url):
+    try:
+        parts=urlsplit(url or '')
+        return (parts.scheme in {'http','https'} and parts.hostname in {'fda.gov','www.fda.gov'}
+                and not parts.username and not parts.password and parts.port in {None,80,443}
+                and any(parts.path.startswith(path) for path in OFFICIAL_SAFETY_PATHS))
+    except (ValueError,TypeError):
+        return False
 REASONS = {
     'eligible': 'Предмет, применение и аудитория соответствуют выбранной задаче',
     'off_topic': 'Материал относится к другой задаче или области применения',
@@ -178,7 +191,8 @@ def assess(material, *, profile=None, purpose='reader', owner_telegram_id=None,
         if topic not in profile['topics'] or not re.search(TOPIC_SIGNALS.get(topic, r'(?!)'), head, re.I):
             return result('needs_review', 'unsupported_topic')
         informational = material.get('source_role') in {'reference', 'professional_information'}
-        regulatory = material.get('kind') == 'regulatory'
+        regulatory = (material.get('source_role') == 'official_safety'
+                      and official_safety_url(material.get('url')))
         if not informational and not regulatory and review.get('human_results') is not True:
             return result('needs_review', 'human_results_required')
     return result('eligible', 'eligible', topic=review['topic'],
@@ -187,11 +201,11 @@ def assess(material, *, profile=None, purpose='reader', owner_telegram_id=None,
 
 
 def material_from_row(row):
-    return dict(zip(('id', 'title', 'text', 'text_scope', 'source_role'), row))
+    return dict(zip(('id', 'title', 'text', 'text_scope', 'source_role', 'url'), row))
 
 
 def get_material(conn, material_id, *, lock=False):
-    row = conn.execute('SELECT id,title,text,text_scope,source_role FROM materials WHERE id=%s' +
+    row = conn.execute('SELECT id,title,text,text_scope,source_role,url FROM materials WHERE id=%s' +
                        (' FOR UPDATE' if lock else ''), (material_id,)).fetchone()
     return material_from_row(row) if row else None
 
@@ -241,7 +255,8 @@ def reader_condition(alias='m'):
     return ("EXISTS (SELECT 1 FROM material_assessments ra WHERE ra.material_id=" + alias +
             ".id AND ra.profile_version=%s AND ra.scope_key='reader' AND ra.status='eligible' "
             "AND ra.text_version=reader_text_version(" + alias + '.title,' + alias + '.text,' +
-            alias + '.text_scope,' + alias + '.source_role))')
+            alias + '.text_scope,' + alias + '.source_role)' +
+            " AND ("+alias+".source_role<>'official_safety' OR "+alias+".url ~ '^https?://(www[.])?fda[.]gov(:443|:80)?/(safety/recalls-market-withdrawals-safety-alerts/|cosmetics/cosmetics-compliance-enforcement/)'))")
 
 
 def record_candidate(conn, material_id):
@@ -261,6 +276,8 @@ REVIEW_PROMPT = '''Оцени применимость ТОЛЬКО по пер�
 работы, исключительно детские данные и протоколы без результатов не дают reader-допуска.
 Смешанную работу оценивай по реальным результатам взрослой человеческой части. Справка
 reference/professional_information может быть полезной без клинического испытания и возраста.
+official_safety на подтверждённом официальном URL может описывать предупреждение или отзыв
+косметики без клинического испытания; не подменяй его рекламным анонсом или одиночным инцидентом.
 Для purpose=question оценивай соответствие конкретному вопросу; это личный допуск,
 который не разрешает публикацию в общей подборке. Не переносить эффекты между задачами.
 Если reader_bounds=true, все ограничения reader по предмету, применению, аудитории,
@@ -307,7 +324,7 @@ def ensure_assessment(conn, material, *, purpose='reader', owner_telegram_id=Non
             review = llm.call(conn, 'reader_review', REVIEW_PROMPT, {
                 'profile': profile, 'purpose': purpose, 'question': question,
                 'reader_bounds': purpose == 'reader' or question_uses_reader_bounds(question),
-                'material': {key: material.get(key) for key in ('title', 'source_role', 'text_scope')},
+                'material': {key: material.get(key) for key in ('title', 'source_role', 'text_scope', 'url')},
                 'text': material.get('text', '')[:18000],
             })
             result = assess(material, review=review, **options)

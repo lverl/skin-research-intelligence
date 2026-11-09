@@ -48,11 +48,12 @@ def split_claims(content, allowed):
     return accepted, indices, checks
 
 
-def verified_checks(check, count):
+def verified_checks(check, count, *, allowed_rejections=()):
     """A bool summary or incomplete/ambiguous verdict cannot approve prose."""
     from net import SourceError
     codes = {'supported', 'unsupported', 'wrong_subject', 'wrong_population',
              'wrong_protocol', 'unsupported_number', 'personal_advice'}
+    codes.update(allowed_rejections)
     if (not isinstance(check, dict) or type(check.get('notes_valid')) is not bool
             or not isinstance(check.get('claims'), list) or len(check['claims']) != count):
         raise SourceError('verification_format')

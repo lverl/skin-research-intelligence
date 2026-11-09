@@ -2,14 +2,18 @@
 import json
 import os
 import hashlib
+import re
 from urllib.parse import urlparse
 from datetime import datetime,timedelta,timezone
 from zoneinfo import ZoneInfo
 import llm
 import db
+import relevance
+from evidence import verified_checks
+from net import SourceError,safe_error
 from db import jsonb as Jsonb
 
-EDITORIAL_VERSION = 4
+EDITORIAL_VERSION = 5
 READER_RULES = (
     'Не включай каталоги и карточки товаров, запуски средств, пресс-релизы и рекламные анонсы. '
     'Конкретное средство включай только при наличии данных исследования готового продукта, независимого сравнения '
@@ -28,6 +32,211 @@ SOURCE_RULES = ('Для научных результатов используй
     'в новое доказательство эффективности. Указывай исходный год старой публикации, не называй её '
     'новым исследованием только из-за даты загрузки. Чужие оценки достоверности передавай с авторством, '
     'не создавай собственных баллов.')
+
+
+def _finding_gate():
+    return ("rf.status='eligible' AND rf.editorial_version=%s AND rf.profile_version=%s "
+            "AND rf.text_version=reader_text_version(m.title,m.text,m.text_scope,m.source_role) "
+            "AND rf.input_signature=reader_fact_version(m.id) AND m.status='done' AND f.verified "
+            "AND cardinality(rf.fact_ids)>0 AND rf.content->'fact_ids'=to_jsonb(rf.fact_ids) "
+            "AND rf.content->'material_ids'=jsonb_build_array(m.id) "
+            "AND NOT EXISTS(SELECT 1 FROM unnest(rf.fact_ids) cited(id) WHERE NOT EXISTS "
+            "(SELECT 1 FROM facts proof WHERE proof.id=cited.id AND proof.material_id=m.id AND proof.active)) "
+            "AND EXISTS(SELECT 1 FROM facts x WHERE x.material_id=m.id AND x.active) AND "
+            +relevance.reader_condition('m'))
+
+
+def current_findings(conn,material_ids=None,*,limit=10,offset=0):
+    """Reader GETs only read a previously checked, still current finding."""
+    profile=relevance.load_profile()['version']
+    params=(EDITORIAL_VERSION,profile,profile)
+    gate=_finding_gate()
+    if material_ids is not None:
+        ids=[i for i in material_ids if type(i) is int and i>0]
+        if not ids:
+            return []
+        gate+=' AND m.id=ANY(%s)'
+        params+=(ids,)
+    params+=(min(max(int(limit),1),100),max(0,int(offset)))
+    rows=conn.execute('''SELECT rf.id,rf.material_id,rf.content,rf.profile_version,rf.text_version,
+        rf.input_signature,rf.editorial_version FROM reader_findings rf
+        JOIN materials m ON m.id=rf.material_id JOIN findings f ON f.material_id=m.id
+        WHERE '''+gate+' ORDER BY rf.created_at DESC,rf.id DESC LIMIT %s OFFSET %s',params).fetchall()
+    result=[]
+    for fid,mid,content,profile,text,signature,editorial in rows:
+        item=dict(content,id=mid,finding_id=fid,profile_version=profile,text_version=text,
+                  input_signature=signature,editorial_version=editorial)
+        source=content['sources'][0]
+        item.update(url=source['url'],source=source['name'],kind=source['kind'],
+                    source_role=source['source_role'],text_scope=source['scope'],published_at=source['published_at'])
+        result.append(item)
+    return result
+
+
+def _split_reader_items(raw,candidates):
+    if not isinstance(raw,dict) or not isinstance(raw.get('items'),list) or len(raw['items'])>10:
+        raise SourceError('validation_error')
+    allowed={c['id']:c for c in candidates}
+    accepted,indices,checks=[],[],[]
+    used=set()
+    for index,item in enumerate(raw['items']):
+        ids=item.get('material_ids') if isinstance(item,dict) else None
+        fact_ids=item.get('fact_ids') if isinstance(item,dict) else None
+        mid=ids[0] if isinstance(ids,list) and len(ids)==1 and type(ids[0]) is int else None
+        candidate=allowed.get(mid)
+        valid=bool(candidate and mid not in used and isinstance(fact_ids,list) and fact_ids and
+            all(type(i) is int and i in {f['id'] for f in candidate['facts']} for i in fact_ids))
+        if valid:
+            for key,maximum,required in (('title',160,True),('summary',400,True),('limitations',400,False)):
+                value=item.get(key,'' if not required else None)
+                if (not isinstance(value,str) or len(value)>maximum or (required and not value.strip())
+                        or (value.strip() and not re.search('[А-Яа-яЁё]',value))):
+                    valid=False
+        if not valid:
+            checks.append({'index':index,'valid':False,'code':'invalid_claim'})
+            continue
+        used.add(mid)
+        accepted.append({'material_ids':[mid],'fact_ids':list(dict.fromkeys(fact_ids)),
+            'title':item['title'].strip(),'summary':item['summary'].strip(),
+            'limitations':item.get('limitations','').strip()})
+        indices.append(index)
+    return accepted,indices,checks
+
+
+def _verified_reader_items(check,count):
+    if not isinstance(check,dict):
+        raise SourceError('verification_format')
+    verdicts,_=verified_checks({'claims':check.get('items'),'notes_valid':True},count,
+                              allowed_rejections=('not_useful','duplicate'))
+    return verdicts
+
+
+def _store_finding(conn,candidate,status,content=None,error=None):
+    with conn.transaction():
+        current=conn.execute('''SELECT m.id FROM materials m JOIN findings f ON f.material_id=m.id
+            WHERE m.id=%s AND m.status='done' AND f.verified
+            AND reader_text_version(m.title,m.text,m.text_scope,m.source_role)=%s
+            AND reader_fact_version(m.id)=%s AND '''+relevance.reader_condition('m')+' FOR UPDATE OF m',
+            (candidate['id'],candidate['text_version'],candidate['input_signature'],candidate['profile_version'])).fetchone()
+        if not current or relevance.load_profile()['version']!=candidate['profile_version']:
+            return False
+        conn.execute('''INSERT INTO reader_findings(material_id,profile_version,text_version,input_signature,
+            editorial_version,status,content,fact_ids,error) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(material_id,profile_version,text_version,input_signature,editorial_version) DO NOTHING''',
+            (candidate['id'],candidate['profile_version'],candidate['text_version'],candidate['input_signature'],
+             EDITORIAL_VERSION,status,Jsonb(content or {}),(content or {}).get('fact_ids',[]),Jsonb(error) if error else None))
+    return True
+
+
+def prepare_findings(conn):
+    """One bounded worker batch; no generation or retry is hidden inside a GET."""
+    locked=conn.execute('SELECT pg_try_advisory_lock(4219,0)').fetchone()[0]
+    if not locked:
+        return {'prepared':0,'errors':[]}
+    try:
+        return _prepare_findings(conn)
+    finally:
+        conn.execute('SELECT pg_advisory_unlock(4219,0)')
+
+
+def _prepare_findings(conn):
+    profile=relevance.load_profile()['version']
+    rows=conn.execute('''SELECT m.id,m.title,m.url,f.kind,m.source_role,m.published_at,m.text_scope,
+        coalesce(s.name,''),reader_text_version(m.title,m.text,m.text_scope,m.source_role),reader_fact_version(m.id),
+        (SELECT jsonb_agg(jsonb_build_object('id',x.id,'statement',x.statement,'quote',x.quote,'payload',x.payload) ORDER BY x.id)
+         FROM facts x WHERE x.material_id=m.id AND x.active)
+        FROM findings f JOIN materials m ON m.id=f.material_id LEFT JOIN sources s ON s.id=m.source_id
+        WHERE m.status='done' AND f.verified AND f.kind<>'commercial'
+        AND EXISTS(SELECT 1 FROM facts x WHERE x.material_id=m.id AND x.active)
+        AND '''+relevance.reader_condition('m')+''' AND NOT EXISTS(SELECT 1 FROM reader_findings rf
+            WHERE rf.material_id=m.id AND rf.profile_version=%s AND rf.editorial_version=%s
+            AND rf.text_version=reader_text_version(m.title,m.text,m.text_scope,m.source_role)
+            AND rf.input_signature=reader_fact_version(m.id))
+        ORDER BY f.created_at DESC,m.id DESC LIMIT 10''',(profile,profile,EDITORIAL_VERSION)).fetchall()
+    candidates=[]
+    for row in rows:
+        item=dict(zip(('id','title','url','kind','source_role','published_at','scope','name',
+                       'text_version','input_signature','facts'),row),profile_version=profile)
+        if not digest_eligible(item):
+            _store_finding(conn,item,'excluded',error=safe_error(SourceError('out_of_scope'),'processing'))
+            continue
+        from worker.main import bounded_kind
+        item['kind']=bounded_kind(item['kind'],item['source_role'])
+        if item['published_at']:
+            item['published_at']=item['published_at'].isoformat()
+        candidates.append(item)
+    if not candidates:
+        return {'prepared':0,'errors':[]}
+    if llm.configuration_issues():
+        from decimal import Decimal,InvalidOperation
+        monetary=False
+        try:
+            values=[Decimal(os.environ.get(name,default)) for name,default in
+                    (('MODEL_MONTHLY_USD','0'),('MODEL_CALL_RESERVE_USD','1'))]
+            monetary=all(v.is_finite() for v in values) and any(v<=0 for v in values)
+        except (InvalidOperation,ValueError):
+            pass
+        configured=all(os.environ.get(name,'').strip() for name in ('MODEL','OPENROUTER_API_KEY'))
+        info=safe_error(llm.BudgetExceeded() if monetary and configured else SourceError('configuration_error'),'processing')
+        return {'prepared':0,'errors':[dict(info,material_id=c['id']) for c in candidates]}
+    generated=False
+    try:
+        raw=llm.call(conn,'digest',READER_RULES+SOURCE_RULES+COMPACT_RULES+
+            'Для каждого пригодного кандидата сформулируй находку по-русски. Читательницы: женщины около 40 лет; '
+            'темы строго из профиля. Заголовок сообщает конкретный результат, а не тему или факт выхода новости. '
+            'Одна мысль, простые слова, без рекламных оценок. summary раскрывает результат и его значение '
+            'для указанной задачи ухода только в пределах источника. Не придумывай практический совет. '
+            'title до160 знаков, summary до400, limitations коротко при существенном ограничении. '
+            'Все три текста подтверждены указанными fact_ids; сохраняй популяцию, протокол, сроки и числа. '
+            'Справка не становится новым исследованием; старый год не становится текущим результатом. '
+            'Не включай ожидания результатов к уже прошедшему сроку без актуальных результатов. '
+            'Не заполняй список ради количества. Верни {items:[{material_ids:[int],fact_ids:[int],title:str,summary:str,limitations:str}]}; '
+            'одна находка на один материал. Нельзя выдавать ингредиент за исследование готового продукта.',candidates)
+        generated=True
+        items,indices,checks=_split_reader_items(raw,candidates)
+        verdicts={}
+        if items:
+            check=llm.call(conn,'digest_verify',READER_RULES+SOURCE_RULES+
+                'Проверь КАЖДУЮ находку независимо по указанным fact_ids. title,summary,limitations целиком '
+                'должны следовать из этих фактов и не менять предмет, аудиторию, протокол, число или срок. '
+                'Она должна давать понятный конкретный вывод для одной из четырёх задач профиля, а не '
+                'выжимку новости или выдуманную пользу. Исключи лабораторное/детское и постороннее применение, '
+                'рекламу, персональные назначения, ингредиент→продукт и просроченные ожидания результатов. '
+                'Верни {items:[{index:int,valid:bool,code:str}]}: ровно один результат на индекс с нуля. '
+                'true только supported; false: unsupported,wrong_subject,wrong_population,wrong_protocol,'
+                'unsupported_number,personal_advice,not_useful,duplicate. Заголовки и пояснения по-русски.',
+                {'items':items,'candidates':candidates,'profile':relevance.load_profile()})
+            verdicts=_verified_reader_items(check,len(items))
+    except Exception as error:
+        info=safe_error(error,'verification' if generated else 'processing')
+        # A pre-call monetary/configuration block may recover without payment.
+        # Other failures remain held for targeted review, never an automatic paid loop.
+        cache=generated or (not isinstance(error,llm.BudgetExceeded) and info['code']!='configuration_error')
+        if cache:
+            for candidate in candidates:
+                _store_finding(conn,candidate,'needs_review',error=info)
+        return {'prepared':0,'errors':[dict(info,material_id=c['id']) for c in candidates]}
+    accepted={}
+    for index,item in enumerate(items):
+        mid=item['material_ids'][0]
+        verdict=verdicts[index]
+        accepted[mid]=(item,verdict)
+    prepared=0
+    errors=[]
+    for candidate in candidates:
+        item,verdict=accepted.get(candidate['id'],(None,None))
+        if verdict and verdict['valid']:
+            item['sources']=[{key:candidate.get(key) for key in ('url','kind','name','source_role','scope','published_at')}]
+            if _store_finding(conn,candidate,'eligible',item):
+                prepared+=1
+        else:
+            code=verdict['code'] if verdict else 'invalid_claim'
+            info=dict(safe_error(SourceError('grounding_rejected'),'verification'),item_code=code)
+            status='excluded' if code in {'wrong_subject','wrong_population','not_useful','duplicate'} else 'needs_review'
+            _store_finding(conn,candidate,status,error=info)
+            if status=='needs_review':
+                errors.append(dict(info,material_id=candidate['id']))
+    return {'prepared':prepared,'errors':errors}
 
 
 def source_coverage(conn,since,until):
@@ -114,21 +323,6 @@ def source_coverage(conn,since,until):
     return dict(stable,period_start=start,period_end=end,fingerprint=fingerprint)
 
 
-def _candidate(row):
-    from worker.main import bounded_kind
-    candidate=dict(zip(('id','title','url','summary','kind','details','verified','source_role','published_at','scope','facts'),row))
-    candidate['kind']=bounded_kind(candidate['kind'],candidate.get('source_role','unknown'))
-    # Actual SQL always includes the proof fields. Six-column legacy fixture
-    # callers retain their prior boundary without inventing facts for them.
-    if candidate['kind'] in {'research','review','guideline'} and 'verified' in candidate:
-        if not candidate['verified'] or not candidate.get('facts'):
-            return None
-    if not digest_eligible(candidate): return None
-    if candidate.get('published_at'):
-        candidate['published_at']=candidate['published_at'].isoformat() if hasattr(candidate['published_at'],'isoformat') else str(candidate['published_at'])
-    return candidate
-
-
 def digest_eligible(candidate):
     """Catalogues and individual adverse events stay searchable, not digestible."""
     parsed = urlparse(candidate['url'])
@@ -147,7 +341,10 @@ def configured_zone():
 
 def generate(conn,now=None):
     try:
-        return _generate(conn,now)
+        # The existing worker invokes this every cycle. Findings are useful to
+        # the feed before the edition hour; GET routes never invoke preparation.
+        preparation=prepare_findings(conn)
+        return _generate(conn,now,preparation)
     except llm.BudgetExceeded:
         # A status edition is still produced without paid calls; never claim no news.
         zone=configured_zone()
@@ -155,81 +352,95 @@ def generate(conn,now=None):
         content={'items':[],'message':'Ежедневный разбор не завершён: исчерпан установленный лимит модели. Материалы остаются в базе для последующей обработки.'}
         return conn.execute("INSERT INTO digests(day,status,content) VALUES (%s,'limited',%s) ON CONFLICT(day) DO UPDATE SET day=EXCLUDED.day RETURNING id",(moment.date(),Jsonb(content))).fetchone()[0]
 
-def _generate(conn,now=None):
+def _finding_errors(conn):
+    profile=relevance.load_profile()['version']
+    rows=conn.execute("""SELECT m.id,m.url,f.kind,rf.error FROM materials m
+        JOIN findings f ON f.material_id=m.id LEFT JOIN reader_findings rf ON rf.material_id=m.id
+            AND rf.profile_version=%s AND rf.editorial_version=%s
+            AND rf.text_version=reader_text_version(m.title,m.text,m.text_scope,m.source_role)
+            AND rf.input_signature=reader_fact_version(m.id)
+        WHERE m.status='done' AND f.verified
+        AND EXISTS(SELECT 1 FROM facts x WHERE x.material_id=m.id AND x.active)
+        AND """+relevance.reader_condition('m')+""" AND (rf.id IS NULL OR rf.status='needs_review')
+        ORDER BY m.id LIMIT 100""",(profile,EDITORIAL_VERSION,profile)).fetchall()
+    errors=[]
+    for mid,url,kind,error in rows:
+        if digest_eligible({'url':url,'kind':kind}):
+            code=(error or {}).get('code','processing_error')
+            errors.append(dict(safe_error(SourceError(code),'verification'),material_id=mid))
+    return errors
+
+
+def _generate(conn,now=None,preparation=None):
     zone=configured_zone()
-    now=now or datetime.now(zone)
-    now=now.astimezone(zone)
+    now=(now or datetime.now(zone)).astimezone(zone)
     if now.hour<int(os.environ.get('DIGEST_HOUR','19')):
         return None
+    profile=relevance.load_profile()['version']
     with conn.transaction():
         conn.execute('SELECT pg_advisory_xact_lock(4210)')
         existing=conn.execute('SELECT id,content,created_at FROM digests WHERE day=%s',(now.date(),)).fetchone()
-        legacy = bool(existing and existing[1].get('editorial_version', 1) < EDITORIAL_VERSION)
-        if existing and not legacy and existing[1].get('items') and existing[1].get('coverage_status','complete')=='complete':
-
-            return existing[0]
-        # Empty status editions can be replaced when processing catches up later
-        # the same day. Their own timestamp is the refresh watermark, otherwise
-        # every worker cycle would repeat the same paid digest generation.
+        legacy=bool(existing and (existing[1].get('editorial_version',1)!=EDITORIAL_VERSION
+                                  or existing[1].get('profile_version')!=profile))
+        prior=[]
+        if existing and not legacy:
+            mids=[mid for item in existing[1].get('items',[]) for mid in item.get('material_ids',[])]
+            current={item['id']:item for item in current_findings(conn,mids,limit=100)}
+            for item in existing[1].get('items',[]):
+                ids=item.get('material_ids',[])
+                match=current.get(ids[0]) if len(ids)==1 else None
+                if match and match['finding_id']==item.get('finding_id'):
+                    prior.append(match)
+        editorial_errors=_finding_errors(conn)
+        fresh_errors={e.get('material_id'):e for e in (preparation or {}).get('errors',[])}
+        editorial_errors=[fresh_errors.get(e.get('material_id'),e) for e in editorial_errors]
         since=(existing[2] if existing and not legacy else
                conn.execute('SELECT max(created_at) FROM digests WHERE id<>%s AND day<%s',
                             (0,now.date())).fetchone()[0] or now-timedelta(days=1))
         coverage=source_coverage(conn,now-timedelta(days=1),now)
-        fields="""m.id,m.title,m.url,f.summary,f.kind,f.details,f.verified,m.source_role,m.published_at,m.text_scope,
-            COALESCE((SELECT jsonb_agg(jsonb_build_object('id',x.id,'statement',x.statement,'quote',x.quote,'payload',x.payload))
-                      FROM facts x WHERE x.material_id=m.id AND x.active),'[]'::jsonb)"""
-        rows=conn.execute("SELECT "+fields+" FROM findings f JOIN materials m ON m.id=f.material_id WHERE f.created_at>%s AND m.status='done' AND f.kind<>'commercial' AND NOT EXISTS(SELECT 1 FROM sources s WHERE s.id=m.source_id AND (s.kind='beauty_facts' OR (s.kind='openfda' AND s.url LIKE '%%/device/event%%'))) AND NOT EXISTS(SELECT 1 FROM digest_items di JOIN digests d ON d.id=di.digest_id WHERE di.material_id=m.id AND d.id<>%s AND d.created_at>=f.created_at) ORDER BY f.created_at DESC LIMIT 100",(since,existing[0] if existing else 0)).fetchall()
-        candidates=[candidate for row in rows if (candidate:=_candidate(row)) is not None]
-        fresh=bool(candidates)
-        if fresh and existing and not legacy and existing[1].get('coverage_status')=='partial':
-            prior_ids=list({mid for item in existing[1].get('items',[]) for mid in item.get('material_ids',[])})
-            old_rows=conn.execute("SELECT "+fields+" FROM findings f JOIN materials m ON m.id=f.material_id WHERE m.id=ANY(%s) AND m.status='done'",(prior_ids,)).fetchall() if prior_ids else []
-            merged={candidate['id']:candidate for candidate in candidates}
-            for row in old_rows:
-                candidate=_candidate(row)
-                if candidate is not None: merged.setdefault(candidate['id'],candidate)
-            candidates=list(merged.values())[:100]
-        source_names=dict(conn.execute('SELECT m.id,s.name FROM materials m JOIN sources s ON s.id=m.source_id WHERE m.id=ANY(%s)',([r['id'] for r in candidates],)).fetchall()) if candidates else {}
-        updates=conn.execute('SELECT topic,version,content,reason FROM conclusions WHERE created_at>%s ORDER BY created_at DESC LIMIT 30',(since,)).fetchall()
-        changes=[dict(zip(('topic','version','content','reason'),r)) for r in updates]
-        coverage_changed=bool(existing and existing[1].get('coverage') and
-                              existing[1]['coverage'].get('fingerprint')!=coverage['fingerprint'])
-        if existing and not legacy and not candidates and not changes and not coverage_changed:
+        coverage['editorial_pending']=len(editorial_errors)
+        coverage['fingerprint']=hashlib.sha256(json.dumps(
+            [coverage['fingerprint'],editorial_errors],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        ids=[row[0] for row in conn.execute("""SELECT m.id FROM reader_findings rf
+            JOIN materials m ON m.id=rf.material_id JOIN findings f ON f.material_id=m.id
+            WHERE """+_finding_gate()+""" AND greatest(rf.created_at,f.created_at)>%s
+            AND NOT EXISTS(SELECT 1 FROM digest_items di JOIN digests d ON d.id=di.digest_id
+                WHERE di.material_id=m.id AND d.id<>%s AND d.created_at>=rf.created_at)
+            ORDER BY rf.created_at DESC,rf.id DESC LIMIT 100""",
+            (EDITORIAL_VERSION,profile,profile,since,existing[0] if existing else 0)).fetchall()]
+        fresh=current_findings(conn,ids,limit=100)
+        combined={item['id']:item for item in fresh}
+        for item in prior:
+            combined.setdefault(item['id'],item)
+        items=list(combined.values())[:10]
+        updates=conn.execute("""SELECT topic,version,content,reason FROM conclusions
+            WHERE is_current AND created_at>%s ORDER BY created_at DESC LIMIT 30""",(since,)).fetchall()
+        changes=[dict(zip(('topic','version','content','reason'),row)) for row in updates]
+        if (existing and not legacy and items==existing[1].get('items',[]) and not changes
+                and existing[1].get('coverage',{}).get('fingerprint')==coverage['fingerprint']
+                and existing[1].get('editorial_errors',[])==editorial_errors):
             return existing[0]
-        if candidates:
-            result=llm.call(conn,'digest',READER_RULES+SOURCE_RULES+COMPACT_RULES+'Собери по-русски дайджест до 10 пунктов для обычных читательниц об уходе за кожей и косметологии. Приоритет: исследования на людях, безопасность, ингредиенты, готовые средства, домашний уход, процедуры, устройства, полезные новинки и экспертные материалы. Пропускай лабораторные протоколы, культуру клеток, опухолевую микросреду и опыты на животных без явной связи с уходом, указанной в источнике. Не переноси результаты животных или клеток на человека. Не заполняй выпуск ради количества: если подходящих материалов нет, верни items: []. title — короткий русский заголовок; summary — что узнали; significance — что это значит для ухода без выдуманных рекомендаций; limitations — ограничения, включая изучение только аннотации и доклиническую модель. Изменение научного вывода необязательно. Убирай повторы и перепечатки. Верни {items:[{material_ids:[int],title:str,summary:str,significance:str,limitations:str}]}. Используй только кандидатов, не добавляй фактов. Для мнений и рекламы указывай тип.',candidates)
-            items=result.get('items')
-            allowed={r['id'] for r in candidates}
-            if not isinstance(items,list) or len(items)>10:
-                raise ValueError('Некорректный дайджест')
-            used=set()
-            for item in items:
-                ids=item.get('material_ids',[])
-                if not ids or any(type(i) is not int or i not in allowed or i in used for i in ids):
-                    raise ValueError('Некорректные ссылки дайджеста')
-                used.update(ids)
-                item['sources']=[{'url':r['url'],'kind':r['kind'],'name':source_names.get(r['id'],''),
-                    'source_role':r.get('source_role','unknown'),'scope':r.get('scope'),
-                    'published_at':r.get('published_at')} for r in candidates if r['id'] in ids]
-            check=llm.call(conn,'digest_verify',READER_RULES+SOURCE_RULES+'Проверь, что дайджест не добавляет неподтверждённых утверждений, не превращает отзывы/рекламу в доказательства, не содержит дублей и персональных назначений. Проверь полезность каждого пункта для обычных читательниц об уходе: исключены лабораторные протоколы без явно обоснованной связи с уходом; нет переноса результатов клеток или животных на человека; заголовки на русском; практический смысл не выдуман. Верни {valid:bool}.',{'items':items,'candidates':candidates})
-            if check.get('valid') is not True:
-                raise ValueError('Дайджест не прошёл проверку')
+        complete=coverage['complete'] and not editorial_errors
+        coverage_status='complete' if complete else 'partial' if items else 'incomplete'
+        if any(error['code']=='budget_exceeded' for error in editorial_errors):
+            message='Проверка находок не завершена: исчерпан установленный лимит модели.'
+        elif editorial_errors:
+            message='Проверка находок не завершена.'
+        elif not coverage['complete']:
+            message='Проверка источников не завершена.'
         else:
-            items=existing[1].get('items',[]) if existing and not legacy and existing[1].get('coverage_status')=='partial' else []
-            used={mid for item in items for mid in item.get('material_ids',[])}
-        revision=int(existing[1].get('revision',1))+1 if existing else 1
-        coverage_status='complete' if coverage['complete'] else 'partial' if items else 'incomplete'
-        message='' if items and coverage['complete'] else 'Подходящих обновлений нет в проверенном объёме.' if coverage['complete'] else 'Проверка источников не завершена.'
-        content={'items':items,'conclusion_updates':changes,'revision':revision,'editorial_version':EDITORIAL_VERSION,
-                 'coverage':coverage,'coverage_status':coverage_status,'message':message}
-        status='ready' if coverage['complete'] else 'partial' if items else 'incomplete'
+            message='' if items else 'Подходящих обновлений нет в проверенном объёме.'
+        content={'items':items,'conclusion_updates':changes,'revision':int(existing[1].get('revision',1))+1 if existing else 1,
+                 'editorial_version':EDITORIAL_VERSION,'profile_version':profile,'coverage':coverage,
+                 'coverage_status':coverage_status,'editorial_errors':editorial_errors,'message':message}
+        status='ready' if complete else 'partial' if items else 'limited' if any(
+            error['code']=='budget_exceeded' for error in editorial_errors) else 'incomplete'
         if existing:
             did=existing[0]
-            conn.execute("UPDATE digests SET content=%s,status=%s,created_at=now() WHERE id=%s",(Jsonb(content),status,did))
-            db.log('digest',f'refreshed edition {did}; revision {revision}; items {len(items)}')
+            conn.execute('UPDATE digests SET content=%s,status=%s,created_at=now() WHERE id=%s',(Jsonb(content),status,did))
         else:
-            did=conn.execute('INSERT INTO digests(day,status,content) VALUES (%s,%s,%s) RETURNING id',(now.date(),status,Jsonb(content))).fetchone()[0]
-            db.log('digest',f'created edition {did}; revision {revision}; items {len(items)}')
-        for mid in used:
+            did=conn.execute('INSERT INTO digests(day,status,content) VALUES (%s,%s,%s) RETURNING id',
+                             (now.date(),status,Jsonb(content))).fetchone()[0]
+        for mid in {mid for item in items for mid in item['material_ids']}:
             conn.execute('INSERT INTO digest_items VALUES (%s,%s) ON CONFLICT DO NOTHING',(did,mid))
         return did

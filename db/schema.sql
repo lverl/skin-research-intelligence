@@ -67,6 +67,23 @@ LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
    'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ',
    'абвгдеёжзийклмнопрстуфхцчшщъыьэюя')
 $$;
+CREATE OR REPLACE FUNCTION reader_fact_version(INTEGER) RETURNS TEXT
+LANGUAGE SQL STABLE AS $$
+ SELECT md5(jsonb_build_object('facts',
+   coalesce((SELECT jsonb_agg(jsonb_build_array(x.id,x.statement,x.quote,x.payload) ORDER BY x.id)
+             FROM facts x WHERE x.material_id=m.id AND x.active),'[]'::jsonb),
+   'kind',f.kind,'verified',f.verified,'url',m.url,'published',extract(epoch FROM m.published_at))::text)
+ FROM materials m JOIN findings f ON f.material_id=m.id WHERE m.id=$1
+$$;
+CREATE TABLE IF NOT EXISTS reader_findings(
+ id BIGSERIAL PRIMARY KEY,material_id INTEGER NOT NULL REFERENCES materials(id),
+ profile_version TEXT NOT NULL,text_version TEXT NOT NULL,input_signature TEXT NOT NULL,
+ editorial_version INTEGER NOT NULL,status TEXT NOT NULL
+   CHECK(status IN ('eligible','excluded','needs_review')),
+ content JSONB NOT NULL DEFAULT '{}',fact_ids INTEGER[] NOT NULL DEFAULT '{}',
+ error JSONB,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(material_id,profile_version,text_version,input_signature,editorial_version));
+CREATE INDEX IF NOT EXISTS reader_findings_current ON reader_findings(profile_version,editorial_version,status,material_id);
 CREATE TABLE IF NOT EXISTS topic_refresh(
  topic TEXT PRIMARY KEY,revision BIGINT NOT NULL DEFAULT 1,done_revision BIGINT NOT NULL DEFAULT 0,
  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','running','ready','failed')),

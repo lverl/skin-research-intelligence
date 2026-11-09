@@ -70,14 +70,17 @@ class SourceAcceptancePostgresTests(unittest.TestCase):
                 return {"claims": [{"index": i, "valid": True, "code": "supported"}
                                    for i in range(len(data["answer"]["claims"]))], "notes_valid": True}
             if stage == "digest_verify":
-                return {"valid": True}
+                return {"items": [{"index": i, "valid": True, "code": "supported"} for i in range(len(data["items"]))]}
             if stage == "digest":
-                return {"items": [{"material_ids": [candidate["id"]], "title": "Материал об уходе",
+                return {"items": [{"material_ids": [candidate["id"]], "fact_ids": [f["id"] for f in candidate["facts"]],
+                                    "title": "Материал об уходе",
                                     "summary": "Контрольный пересказ материала", "limitations": "Изучен доступный фрагмент"}
                                    for candidate in data]}
             raise AssertionError("Unexpected model stage: " + stage)
 
         settings = {"EXA_API_KEY": "", "EXA_MONTHLY_USD": "0", "EXA_SCOPE_USD": "0",
+                    "MODEL": "offline-editorial-fixture", "OPENROUTER_API_KEY": "offline-fixture",
+                    "MODEL_MONTHLY_USD": "10", "MODEL_CALL_RESERVE_USD": "1",
                     "DIGEST_TIMEZONE": "UTC", "DIGEST_HOUR": "0", "TELEGRAM_CHAT_IDS": "42",
                     "TELEGRAM_TOKEN": "testOnlyDeliveryToken"}
         with patch.dict(os.environ, settings), patch.dict(collector.READERS, non_target), \

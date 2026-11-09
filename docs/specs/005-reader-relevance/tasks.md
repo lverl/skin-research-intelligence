@@ -8,8 +8,8 @@
 | 2 FIX-007 | Допуск до анализа; cap8 старых; кеш и отсутствие повторной оплаты | root | reader_tests_b | answer_path_audit | Проверено C: 230 passed / 0 skipped, 80 PG, Critical/Important 0 |
 | 3 FIX-009 | 0 общего synthesis в вопросе; объединение тем, атомарность/гонки/повторы | root | reader_tests_b | answer_path_audit | Проверено C: 251 passed / 0 skipped, 101 PG; daily concurrency stress 10/10 |
 | 4 FIX-008 | Тематический непустой ответ, независимые подтверждения, безопасные ошибки | root | reader_tests_b | answer_path_audit | Проверено C: 280 passed / 0 skipped, 116 PG; Critical/Important 0 |
-| 5 DIG-002 | Проверенная находка с фактами; 0 постороннего, отдельные непригодные отбрасываются | root | reader_tests_b | answer_path_audit | Следующая задача |
-| 6 UI-001 | Серверный допуск, права, вкладки/история, 10/5, настоящий браузер375px | root | reader_tests_b | answer_path_audit | Ожидает DIG-002 |
+| 5 DIG-002 | Проверенная находка с фактами; 0 постороннего, отдельные непригодные отбрасываются | root | reader_tests_b | answer_path_audit | Проверено C: 311 passed / 0 skipped, 138 PG; Critical/Important 0 |
+| 6 UI-001 | Серверный допуск, права, вкладки/история, 10/5, настоящий браузер375px | root | reader_tests_b | answer_path_audit | Следующая задача |
 | 7 QA-004 | Сквозная PostgreSQL, документы и обозначенные границы живой приёмки | root | reader_tests_b | answer_path_audit | Ожидает UI-001 |
 
 Один ID — один коммит. До каждого C запускает весь набор; фиксируются counts/skips и read-only ревью. Непроверенное не Done. Подробные тесты — утверждённая SPEC §3–4; живую приёмку подменённым API не заменять.

@@ -142,7 +142,8 @@ PROMPT='Составь справочный ответ по-русски тол�
 
 SOURCE_RULES=('Сохраняй source_role и вид доступного текста каждого факта. Справка и объяснения пациентам '
     '(reference, professional_information) не являются отдельным исследованием или формальной рекомендацией. '
-    'systematic_review_summary — публичное резюме обзора, не полный текст. Оценку достоверности источника '
+    'systematic_review_summary — публичное резюме обзора, не полный текст. official_safety — '
+    'официальное сообщение о безопасности, не клиническое испытание. Оценку достоверности источника '
     'передавай с указанием его авторства; собственные числовые баллы не придумывай. Для широкого вопроса '
     'дай обзор разных задач и протоколов, представленных в фактах, сохраняя их различия и пробелы. '
     'Не переноси результаты между разными веществами, ретиноидами, устройствами, показаниями, группами или сроками.')
@@ -380,7 +381,7 @@ def _review_existing(conn, lookup, question, owner_telegram_id, reviewed):
     purpose='question' if owner_telegram_id is not None else 'reader'
     scope=relevance.scope_key(purpose,owner_telegram_id,question)
     version=relevance.load_profile()['version']
-    rows=conn.execute('''SELECT m.id,m.title,m.text,m.text_scope,m.source_role FROM materials m
+    rows=conn.execute('''SELECT m.id,m.title,m.text,m.text_scope,m.source_role,m.url FROM materials m
         JOIN findings f ON f.material_id=m.id WHERE m.status='done' AND f.verified
         AND NOT(m.id=ANY(%s)) AND EXISTS(SELECT 1 FROM facts x WHERE x.material_id=m.id
             AND x.active AND (reader_casefold(m.title) LIKE ANY(%s) OR

@@ -79,9 +79,13 @@ class PostgresTests(unittest.TestCase):
             if stage in ('synthesis_verify','answer_verify'):
                 return {'claims':[{'index':i,'valid':True,'code':'supported'}
                                   for i in range(len(data['answer']['claims']))],'notes_valid':True}
-            if stage=='digest_verify': return {'valid':True}
+            if stage=='digest_verify':
+                return {'items':[{'index':i,'valid':True,'code':'supported'} for i in range(len(data['items']))]}
             if stage=='search_plan': return {'query':topic,'terms':[self.suffix],'clarification':''}
-            if stage=='digest': return {'items':[{'material_ids':[mid],'title':'Исследование','summary':'Тестовый пересказ','significance':'Новые данные','limitations':'Аннотация'}]}
+            if stage=='digest':
+                candidate=next(c for c in data if c['id']==mid)
+                return {'items':[{'material_ids':[mid],'fact_ids':[f['id'] for f in candidate['facts']],
+                                  'title':'Исследование','summary':'Тестовый пересказ','limitations':'Аннотация'}]}
             raise AssertionError(stage)
 
         with patch.object(llm,'call',side_effect=model),patch('collector.main.search',return_value={'processed':0,'failed_sources':[]}),patch.dict(os.environ,{'DIGEST_TIMEZONE':'UTC','DIGEST_HOUR':'0'}):

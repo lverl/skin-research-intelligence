@@ -68,6 +68,8 @@ def ingest(conn, item, source_id=None, run_id=None):
     from collector.exa import source_role_for_url
     inferred_role = source_role_for_url(url)
     source_role = inferred_role if inferred_role != "research_candidate" else item.get("source_role", "unknown")
+    if source_role == 'official_safety' and inferred_role != 'official_safety':
+        source_role = 'unknown'
     title = str(item.get("title") or url).strip()
     text = str(item.get("text") or "").strip()
     scope = item.get("text_scope", "excerpt")

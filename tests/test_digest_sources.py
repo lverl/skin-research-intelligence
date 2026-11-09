@@ -8,6 +8,8 @@ from uuid import uuid4
 
 import digest
 import llm
+import relevance
+from test_reader_relevance import complete_review
 from bot.main import format_digest
 from collector.main import ingest
 
@@ -23,7 +25,9 @@ class DigestSourcePostgresTests(unittest.TestCase):
         self.conn = psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True,
                                     options=f"-c search_path={self.schema} -c statement_timeout=5000 -c lock_timeout=3000")
         db.init_schema(self.conn)
-        self.environment = patch.dict(os.environ, {"DIGEST_TIMEZONE": "UTC", "DIGEST_HOUR": "0", "EXA_MONTHLY_USD": "0"})
+        self.environment = patch.dict(os.environ, {"DIGEST_TIMEZONE": "UTC", "DIGEST_HOUR": "0", "EXA_MONTHLY_USD": "0",
+            "MODEL": "offline-editorial-fixture", "OPENROUTER_API_KEY": "offline-fixture",
+            "MODEL_MONTHLY_USD": "10", "MODEL_CALL_RESERVE_USD": "1"})
         self.environment.start()
         self.now = datetime.now(timezone.utc) + timedelta(minutes=5)
         self.since = self.now - timedelta(days=1)
@@ -54,7 +58,8 @@ class DigestSourcePostgresTests(unittest.TestCase):
     def material(self, sid, *, verified=True, role="research_candidate", kind="research", active_fact=True):
         from db import jsonb
         url = "https://example.org/fixture/" + uuid4().hex
-        mid = ingest(self.conn, {"url": url, "title": "Synthetic research fixture", "text": "Twelve fixture observations were recorded.",
+        text = "Synthetic adult facial retinol study reports human clinical results. Twelve fixture observations were recorded."
+        mid = ingest(self.conn, {"url": url, "title": "Adult facial retinol research fixture", "text": text,
                                  "text_scope": "excerpt", "source_role": role}, sid)
         self.conn.execute("UPDATE materials SET status='done' WHERE id=%s", (mid,))
         self.conn.execute("""INSERT INTO findings(material_id,summary,model,prompt_version,kind,verified,details)
@@ -62,15 +67,19 @@ class DigestSourcePostgresTests(unittest.TestCase):
                           (mid, kind, verified, jsonb({"text_scope": "excerpt", "source_role": role})))
         self.conn.execute("INSERT INTO facts(material_id,statement,quote,active) VALUES (%s,'Synthetic fixture result','Twelve fixture observations were recorded.',%s)",
                           (mid, active_fact))
+        with patch.object(llm, "call", return_value=complete_review({"text": text})):
+            decision = relevance.ensure_assessment(self.conn, relevance.get_material(self.conn, mid))
+        self.assertEqual(decision["status"], "eligible")
         return mid
 
     def model(self, conn, stage, instructions, data):
         if stage == "digest":
             candidates = data if isinstance(data, list) else data["candidates"]
-            return {"items": [{"material_ids": [candidates[0]["id"]], "title": "Фикстура", "summary": "Подтверждённый пункт фикстуры",
+            return {"items": [{"material_ids": [candidates[0]["id"]], "fact_ids": [f["id"] for f in candidates[0]["facts"]],
+                                "title": "Фикстура", "summary": "Подтверждённый пункт фикстуры",
                                 "limitations": "Доступен только фрагмент"}]}
         if stage == "digest_verify":
-            return {"valid": True}
+            return {"items": [{"index": i, "valid": True, "code": "supported"} for i in range(len(data["items"]))]}
         raise AssertionError(stage)
 
     def edition(self, did):
