@@ -50,7 +50,8 @@ function descend(element) {
   return [element, ...element.children.flatMap(child => child instanceof Element ? descend(child) : [])];
 }
 
-async function boot({response = {}, history = [], error = null, networkError = null, initData = 'fixture-telegram-init'} = {}) {
+async function boot({response = {}, history = [], error = null, historyError = null, sessionError = null,
+    networkError = null, initData = 'fixture-telegram-init'} = {}) {
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[1], new Element('div', match[1])]));
   const tabs = ['ask-panel', 'feed-panel', 'saved-panel'].map(panel => {
     const button = new Element('button');
@@ -79,8 +80,17 @@ async function boot({response = {}, history = [], error = null, networkError = n
       savedRows = [{id: 1, question: sent.question, created_at: '2026-11-08T12:00:00Z', content: currentResponse}];
       return {ok: true, json: async () => currentResponse};
     }
-    if (url === '/api/miniapp/answers') return {ok: true, json: async () => savedRows};
-    if (url === '/api/miniapp/session') return {ok: true, json: async () => ({telegram_id: 42, role: 'owner'})};
+    if (url.startsWith('/api/miniapp/answers')) {
+      if (historyError) return {ok: false, json: async () => ({error: historyError})};
+      const parsed = new URL(url, 'https://reader.invalid');
+      const offset = Number(parsed.searchParams.get('offset') || 0);
+      const limit = Number(parsed.searchParams.get('limit') || 5);
+      return {ok: true, json: async () => savedRows.slice(offset, offset + limit)};
+    }
+    if (url === '/api/miniapp/session') {
+      if (sessionError) return {ok: false, json: async () => ({error: sessionError})};
+      return {ok: true, json: async () => ({telegram_id: 42, role: 'owner'})};
+    }
     throw new Error('Unexpected API request: ' + url);
   };
   const context = vm.createContext({document, fetch, window: {Telegram: {WebApp: {initData, ready() {}, expand() {}}}},
@@ -101,6 +111,8 @@ async function boot({response = {}, history = [], error = null, networkError = n
   };
 }
 
+function answerText(app) { return app.elements.get('status').textContent + ' ' + app.elements.get('result').textContent; }
+
 function source() {
   return {url: 'https://www.aad.org/public/fixture', title: 'Публичный материал AAD', kind: 'expert',
     scope: 'excerpt', source_role: 'professional_information'};
@@ -114,7 +126,7 @@ function verified(status = 'completed') {
 test('completed form response displays the verified claim, original link and Russian type', async () => {
   const app = await boot({response: verified()});
   await app.submit();
-  assert.match(app.elements.get('status').textContent, /Ответ готов/i);
+  assert.match(answerText(app), /Ответ готов/i);
   const rendered = app.elements.get('result').textContent;
   assert.match(rendered, /Подтверждённое утверждение фикстуры/);
   assert.doesNotMatch(rendered, /professional_information|\bexpert\b/);
@@ -131,8 +143,8 @@ test('partial response keeps claim, limits and source without calling it ready',
       code: 'timeout', reason: 'Источник не ответил вовремя'}]};
   const app = await boot({response});
   await app.submit();
-  assert.match(app.elements.get('status').textContent.toLowerCase(), /частич|непол|по части/);
-  assert.doesNotMatch(app.elements.get('status').textContent, /Ответ готов/i);
+  assert.match(answerText(app).toLowerCase(), /частич|непол|по части/);
+  assert.doesNotMatch(answerText(app), /Ответ готов/i);
   const rendered = app.elements.get('result').textContent;
   assert.match(rendered, /Подтверждённое утверждение/);
   assert.match(rendered, /Часть источников недоступна/);
@@ -142,14 +154,14 @@ test('partial response keeps claim, limits and source without calling it ready',
 test('completed with no claims is displayed as insufficient, never ready', async () => {
   const app = await boot({response: {status: 'completed', claims: [], sources: []}});
   await app.submit();
-  assert.doesNotMatch(app.elements.get('status').textContent, /Ответ готов/i);
-  assert.match((app.elements.get('status').textContent + app.elements.get('result').textContent).toLowerCase(), /недостат|нет проверенных/);
+  assert.doesNotMatch(answerText(app), /Ответ готов/i);
+  assert.match((answerText(app) + app.elements.get('result').textContent).toLowerCase(), /недостат|нет проверенных/);
 });
 
 test('blank claim object does not make completed response substantively ready', async () => {
   const app = await boot({response: {status: 'completed', claims: [{text: '   ', fact_ids: []}], sources: []}});
   await app.submit();
-  assert.doesNotMatch(app.elements.get('status').textContent, /Ответ готов/i);
+  assert.doesNotMatch(answerText(app), /Ответ готов/i);
 });
 
 test('failed research is a technical failure instead of absence of studies', async () => {
@@ -157,8 +169,8 @@ test('failed research is a technical failure instead of absence of studies', asy
     limitations: ['Проверка источников не завершена'], source_checks: [{name: 'Источник', status: 'failed',
       planned: true, complete: false, code: 'dns_error', reason: 'Не удалось определить адрес источника'}]}});
   await app.submit();
-  assert.doesNotMatch(app.elements.get('status').textContent, /Ответ готов/i);
-  assert.match(app.elements.get('status').textContent.toLowerCase(), /не заверш|сбой|не удалось|ошиб/);
+  assert.doesNotMatch(answerText(app), /Ответ готов/i);
+  assert.match(answerText(app).toLowerCase(), /не заверш|сбой|не удалось|ошиб/);
   assert.match(app.elements.get('result').textContent, /Проверка источников не завершена/);
 });
 
@@ -166,8 +178,8 @@ test('successful empty research displays insufficient data', async () => {
   const app = await boot({response: {status: 'insufficient_data', claims: [], sources: [],
     missing_data: ['В проверенном объёме данных недостаточно']}});
   await app.submit();
-  assert.doesNotMatch(app.elements.get('status').textContent, /Ответ готов/i);
-  assert.match((app.elements.get('status').textContent + app.elements.get('result').textContent).toLowerCase(), /недостат/);
+  assert.doesNotMatch(answerText(app), /Ответ готов/i);
+  assert.match((answerText(app) + app.elements.get('result').textContent).toLowerCase(), /недостат/);
 });
 
 test('necessary clarification is visible and recorded in history without chat continuation', async () => {
@@ -176,7 +188,7 @@ test('necessary clarification is visible and recorded in history without chat co
   await app.submit('Эффективен ли этот крем?');
   assert.match(app.elements.get('result').textContent, /Как называется крем\?/);
   assert.match(app.elements.get('history').textContent, /Как называется крем\?/);
-  assert.doesNotMatch(app.elements.get('status').textContent, /Ответ готов/i);
+  assert.doesNotMatch(answerText(app), /Ответ готов/i);
   assert.equal(app.elements.get('ask-button').disabled, false);
 });
 
@@ -185,15 +197,15 @@ test('request failure preserves the entered question and restores submit button'
   await app.submit('Мой исходный вопрос');
   assert.equal(app.elements.get('question').value, 'Мой исходный вопрос');
   assert.equal(app.elements.get('ask-button').disabled, false);
-  assert.match(app.elements.get('status').textContent, /Не удалось/);
-  assert.doesNotMatch(app.elements.get('status').textContent, /Ответ готов/i);
+  assert.match(answerText(app), /Не удалось/);
+  assert.doesNotMatch(answerText(app), /Ответ готов/i);
 });
 
 test('native fetch rejection shows a safe Russian retry message and keeps the question', async () => {
   const canary = 'testOnlyBrowserCanary_FIX002';
   const app = await boot({networkError: new TypeError('Failed to fetch ' + canary)});
   await app.submit('Исходный вопрос после сетевого сбоя');
-  const rendered = app.elements.get('status').textContent + ' ' + app.elements.get('result').textContent;
+  const rendered = answerText(app) + ' ' + app.elements.get('result').textContent;
   assert.doesNotMatch(rendered, /Failed to fetch|TypeError/);
   assert.ok(!rendered.includes(canary));
   assert.match(rendered, /[А-Яа-я]/);
@@ -209,11 +221,11 @@ test('failed result retains the question and allows an ordinary form retry', asy
   await app.submit(question);
   assert.equal(app.elements.get('question').value, question);
   assert.equal(app.elements.get('ask-button').disabled, false);
-  assert.doesNotMatch(app.elements.get('status').textContent, /Ответ готов/i);
+  assert.doesNotMatch(answerText(app), /Ответ готов/i);
   app.nextResponse(verified());
   await app.submit(question);
   assert.equal(app.calls.filter(call => call.url === '/api/miniapp/ask').length, 2);
-  assert.match(app.elements.get('status').textContent, /Ответ готов/i);
+  assert.match(answerText(app), /Ответ готов/i);
   assert.match(app.elements.get('result').textContent, /Подтверждённое утверждение/);
 });
 
@@ -238,4 +250,44 @@ test('without Telegram initialization the form stays unavailable and no private 
   const app = await boot({initData: ''});
   assert.equal(app.elements.get('ask-form').classList.contains('hidden'), true);
   assert.equal(app.calls.length, 0);
+});
+
+test('history service failure preserves authenticated form and cannot overwrite a good answer', async () => {
+  const app = await boot({response: verified(), historyError: 'Не удалось загрузить историю'});
+  assert.equal(app.elements.get('ask-form').classList.contains('hidden'), false);
+  assert.match(app.elements.get('history').textContent, /Не удалось загрузить историю/);
+  await app.submit();
+  assert.match(answerText(app), /Ответ готов/);
+  assert.match(app.elements.get('result').textContent, /Подтверждённое утверждение/);
+  assert.equal(app.elements.get('ask-button').disabled, false);
+  assert.doesNotMatch(answerText(app), /Не удалось загрузить историю/);
+});
+
+test('failed session still keeps the private question form unavailable', async () => {
+  const app = await boot({sessionError: 'Доступ не подтверждён'});
+  assert.equal(app.elements.get('ask-form').classList.contains('hidden'), true);
+  assert.match(app.elements.get('status').textContent, /Доступ не подтверждён/);
+  assert.equal(app.calls.some(call => call.url.startsWith('/api/miniapp/answers')), false);
+});
+
+test('initial history has five collapsed native details and explicit next offset', async () => {
+  const history = Array.from({length: 7}, (_, index) => ({id: index + 1, question: 'Вопрос ' + (index + 1),
+    created_at: '2026-11-09T12:00:00Z', content: {status: 'failed', claims: [], limitations: []}}));
+  const app = await boot({history});
+  const details = () => descend(app.elements.get('history')).filter(element => element.tagName === 'DETAILS');
+  assert.equal(details().length, 5);
+  assert.ok(details().every(element => !element.open));
+  assert.ok(details().every(element => element.children[0].tagName === 'SUMMARY'));
+  assert.ok(details().every(element => element.textContent.split('Проверка не завершена').length - 1 === 1));
+  const more = app.elements.get('history-more').listeners.get('click');
+  assert.equal(typeof more, 'function');
+  await more();
+  assert.equal(details().length, 7);
+  assert.ok(app.calls.some(call => call.url === '/api/miniapp/answers?limit=5&offset=5'));
+});
+
+test('form response displays its state exactly once', async () => {
+  const app = await boot({response: {status: 'failed', claims: [], sources: [], limitations: []}});
+  await app.submit();
+  assert.equal(answerText(app).split('Проверка не завершена. Попробуйте позже.').length - 1, 1);
 });

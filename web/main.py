@@ -47,6 +47,15 @@ def rows(conn, sql, params=()):
     return [dict(zip(names, row)) for row in cursor.fetchall()]
 
 
+def miniapp_page(query, maximum):
+    params=parse_qs(query)
+    limit=int(params.get('limit',[str(maximum)])[0])
+    offset=int(params.get('offset',['0'])[0])
+    if offset<0:
+        raise ValueError('Неверные параметры списка')
+    return min(max(limit,1),maximum),offset
+
+
 def clean_config(config):
     if not isinstance(config, dict):
         return {}
@@ -148,21 +157,26 @@ class Handler(BaseHTTPRequestHandler):
                     if parsed.path == '/api/miniapp/session':
                         data = {'telegram_id': telegram_id, 'role': 'owner'}
                     elif parsed.path == '/api/miniapp/answers':
-                        data = rows(conn, 'SELECT id,question,content,created_at FROM answers WHERE owner_telegram_id=%s ORDER BY created_at DESC LIMIT 50', (telegram_id,))
+                        limit,offset=miniapp_page(parsed.query,5)
+                        data = rows(conn, 'SELECT id,question,content,created_at FROM answers WHERE owner_telegram_id=%s ORDER BY created_at DESC,id DESC LIMIT %s OFFSET %s', (telegram_id,limit,offset))
                     elif parsed.path == '/api/miniapp/feed':
-                        data = rows(conn, """SELECT m.id,m.title,m.url,m.text_scope,m.published_at,m.collected_at,
-                            f.summary,f.kind,f.topics,s.name AS source
-                            FROM materials m LEFT JOIN findings f ON f.material_id=m.id
-                            LEFT JOIN sources s ON s.id=m.source_id
-                            WHERE m.status IN ('done','new') ORDER BY m.collected_at DESC LIMIT 50""")
+                        from digest import current_findings
+                        limit,offset=miniapp_page(parsed.query,10)
+                        data=current_findings(conn,limit=limit,offset=offset)
                     elif parsed.path == '/api/miniapp/saved':
-                        data = rows(conn, """SELECT m.id,m.title,m.url,m.text_scope,m.collected_at,f.summary,f.kind,s.name AS source,sm.saved_at
+                        data = rows(conn, """SELECT m.id,m.title,m.url,m.text_scope,m.source_role,m.published_at,f.kind,s.name AS source,sm.saved_at
                             FROM saved_materials sm JOIN materials m ON m.id=sm.material_id
                             LEFT JOIN findings f ON f.material_id=m.id LEFT JOIN sources s ON s.id=m.source_id
                             WHERE sm.owner_telegram_id=%s ORDER BY sm.saved_at DESC LIMIT 100""", (telegram_id,))
+                        from digest import current_findings
+                        current={item['id']:item for item in current_findings(conn,[item['id'] for item in data],limit=100)}
+                        data=[dict(current[item['id']],saved_at=item['saved_at'],review_status='eligible') if item['id'] in current else
+                              dict(item,summary='',review_status='needs_review',notice='Сохранённый материал не входит в текущую подборку. Доступен первоисточник.') for item in data]
                     else:
                         self.respond(404, {'error': 'Страница не найдена'}); return
                 self.respond(200, data)
+            except ValueError:
+                self.respond(400, {'error': 'Неверные параметры списка'})
             except Exception:
                 self.respond(500, {'error': 'Не удалось загрузить личные данные'})
             return
@@ -233,11 +247,14 @@ class Handler(BaseHTTPRequestHandler):
                             material_id = int(payload.get('material_id'))
                         except (ValueError, TypeError):
                             raise ValueError('Некорректный материал') from None
-                        saved = conn.execute('INSERT INTO saved_materials(owner_telegram_id,material_id) SELECT %s,id FROM materials WHERE id=%s ON CONFLICT DO NOTHING RETURNING material_id', (telegram_id, material_id)).fetchone()
-                        if not saved:
-                            exists = conn.execute('SELECT 1 FROM materials WHERE id=%s', (material_id,)).fetchone()
-                            if not exists:
-                                raise ValueError('Материал не найден')
+                        own=conn.execute('SELECT 1 FROM saved_materials WHERE owner_telegram_id=%s AND material_id=%s',
+                                         (telegram_id,material_id)).fetchone()
+                        if not own:
+                            from digest import current_findings
+                            if not current_findings(conn,[material_id],limit=1):
+                                self.respond(404, {'error': 'Материал не найден'}); return
+                            conn.execute('INSERT INTO saved_materials(owner_telegram_id,material_id) VALUES (%s,%s) ON CONFLICT DO NOTHING',
+                                         (telegram_id,material_id))
                         data = {'material_id': material_id, 'saved': True}
                     else:
                         self.respond(404, {'error': 'Действие не найдено'}); return
