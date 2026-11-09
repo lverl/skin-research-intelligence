@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 import db
+import relevance
 from net import fetch
 from net import safe_error, SourceError, ERROR_REASONS
 from collector.adapters import READERS, plain_text
@@ -17,11 +18,7 @@ from collector.adapters import READERS, plain_text
 
 SOURCES = Path(__file__).resolve().parent.parent / "sources.json"
 SCOPES = {"metadata": 0, "excerpt": 1, "abstract": 2, "full_text": 3}
-DAILY_TOPICS = (
-    'skin care ingredients topical evidence home care',
-    'cosmetic dermatology procedures laser radiofrequency devices evidence',
-    'skin care clinical research cosmetics product evidence updates',
-)
+DAILY_TOPICS = tuple(relevance.load_profile()['monitoring_queries'])
 
 
 def normalize_doi(value):
@@ -115,6 +112,7 @@ def ingest(conn, item, source_id=None, run_id=None):
                         SET source_role=CASE WHEN material_sources.source_role IN ('unknown','research_candidate')
                           THEN EXCLUDED.source_role ELSE material_sources.source_role END""",
                      (material_id,source_id,url,item.get("source_role",source_role)))
+        relevance.record_candidate(conn,material_id)
         return material_id
 
 

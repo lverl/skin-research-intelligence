@@ -1,0 +1,20 @@
+{
+  "version": "reader-20261109-v1",
+  "audience": {"gender": "women", "approximate_age": 40, "age_is_hard_cutoff": false},
+  "topics": {
+    "home_skincare": "Домашний уход за кожей лица и шеи",
+    "aesthetic_procedures": "Эстетические процедуры для лица и шеи",
+    "home_devices_massage": "Домашние устройства и массаж лица",
+    "finished_cosmetics": "Независимые данные о готовой косметике"
+  },
+  "applications": ["face_neck", "facial_skincare"],
+  "audiences": ["adults", "general_adults"],
+  "monitoring_queries": [
+    "adult women facial neck topical skincare pigmentation photoaging sunscreen human clinical evidence",
+    "adult facial neck cosmetic laser BBL IPL radiofrequency home device facial massage human clinical results",
+    "independent finished facial cosmetic moisturizer serum sunscreen product human study safety results"
+  ],
+  "excluded_monitoring": ["gynaecology", "dentistry", "ophthalmology", "parenteral_nutrition", "chronic_wounds_without_cosmetic_application", "laboratory_only", "paediatric_only", "body_hair", "lifestyle", "advertising_without_independent_evidence"],
+  "legacy_per_cycle": 8,
+  "legacy_per_question": 8
+}

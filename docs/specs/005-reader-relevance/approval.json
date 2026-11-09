@@ -1,0 +1,11 @@
+{
+  "date": "2026-11-09",
+  "utterance": "утверждаю",
+  "approved_spec_sha256": "7186F69E8D9CF1B3E1530267783B10D32D182FA25BAC624DE5960F25E50FA3D6",
+  "review_hash": "1ed4cbdcf0",
+  "snapshot": "approved-spec.md",
+  "scope": ["FIX-001", "FIX-007", "FIX-009", "FIX-008", "DIG-002", "UI-001", "QA-004"],
+  "publishing_authorized": false,
+  "deployment_authorized": false,
+  "bulk_paid_reprocessing_authorized": false
+}

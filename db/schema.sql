@@ -45,6 +45,21 @@ CREATE TABLE IF NOT EXISTS telegram_state(key TEXT PRIMARY KEY,value BIGINT NOT 
 CREATE TABLE IF NOT EXISTS model_calls(id SERIAL PRIMARY KEY,stage TEXT NOT NULL,model TEXT NOT NULL,reserved_usd NUMERIC NOT NULL,actual_usd NUMERIC,created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 ALTER TABLE materials ADD COLUMN IF NOT EXISTS source_role TEXT NOT NULL DEFAULT 'unknown';
 ALTER TABLE material_sources ADD COLUMN IF NOT EXISTS source_role TEXT NOT NULL DEFAULT 'unknown';
+-- Admission is separate from processing status, quotations and private questions.
+CREATE OR REPLACE FUNCTION reader_text_version(TEXT,TEXT,TEXT,TEXT) RETURNS TEXT
+LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
+ SELECT md5(length(coalesce($1,''))::text || ':' || coalesce($1,'') ||
+            length(coalesce($2,''))::text || ':' || coalesce($2,'') ||
+            length(coalesce($3,'excerpt'))::text || ':' || coalesce($3,'excerpt') ||
+            length(coalesce($4,'unknown'))::text || ':' || coalesce($4,'unknown'))
+$$;
+CREATE TABLE IF NOT EXISTS material_assessments(
+ id BIGSERIAL PRIMARY KEY,material_id INTEGER NOT NULL REFERENCES materials(id),
+ profile_version TEXT NOT NULL,text_version TEXT NOT NULL,scope_key TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('eligible','excluded','needs_review')),code TEXT NOT NULL,
+ details JSONB NOT NULL,reviewed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(material_id,profile_version,text_version,scope_key));
+CREATE INDEX IF NOT EXISTS material_assessments_reader ON material_assessments(profile_version,scope_key,status,material_id);
 -- Exa reservation commits on a separate connection: no FK to uncommitted runs.
 CREATE TABLE IF NOT EXISTS search_calls(
  id BIGSERIAL PRIMARY KEY,scope_id TEXT NOT NULL,purpose TEXT NOT NULL CHECK(purpose IN ('question','daily')),
